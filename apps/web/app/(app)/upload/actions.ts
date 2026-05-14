@@ -194,9 +194,10 @@ export async function finalizeLessonUpload(
     };
   }
 
-  // Enqueue the long-running processing pipeline on Trigger.dev. Best-effort:
-  // a failure here is logged but doesn't roll back the upload — the
-  // lesson_jobs row stays `queued` and a manual re-dispatch can pick it up.
+  // Enqueue the long-running processing pipeline on Trigger.dev. The upload
+  // itself is kept; an enqueue failure is persisted onto the lesson_jobs row
+  // as a terminal `failed` status so the UI shows the error immediately
+  // instead of leaving the lesson stuck in `queued` with no worker polling.
   const enqueue = await enqueueLessonProcessing(data.lessonId);
   if (enqueue.ok && !enqueue.skipped && enqueue.runId) {
     const { error: tagError } = await supabase
@@ -208,6 +209,18 @@ export async function finalizeLessonUpload(
     }
   } else if (!enqueue.ok) {
     console.error("[upload] could not enqueue processing job", enqueue.error);
+    const summary = `Could not enqueue processing job: ${enqueue.error}`;
+    const { error: failError } = await supabase
+      .from("lesson_jobs")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_summary: summary,
+      })
+      .eq("lesson_id", data.lessonId);
+    if (failError) {
+      console.error("[upload] could not mark job failed after enqueue error", failError);
+    }
   }
 
   revalidatePath("/upload");

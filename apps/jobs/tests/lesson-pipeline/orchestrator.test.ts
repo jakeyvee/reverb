@@ -207,6 +207,33 @@ describe("runLessonPipeline", () => {
     expect(meta.last_failure?.stage).toBe("extracting");
   });
 
+  it("persists failure state when source audio cannot be loaded", async () => {
+    // Arrange: the job row exists, but no audio_source file row was inserted
+    // (e.g. the lesson_files row is missing or has the wrong bucket / the
+    // signed URL call fails). The orchestrator previously threw here before
+    // entering its try block, leaving the row queued forever.
+    const supabase = new FakeSupabase();
+    supabase.insertJob(buildJob());
+
+    await expect(
+      runLessonPipeline({
+        supabase: asClient(supabase),
+        payload: { lessonId: LESSON_ID },
+        triggerRunId: "run_no_audio",
+        logger: noopLogger,
+      }),
+    ).rejects.toThrow(/no audio_source row/);
+
+    const job = supabase.job();
+    expect(job.status).toBe("failed");
+    expect(job.failed_at).not.toBeNull();
+    expect(job.error_summary).toMatch(/no audio_source row/);
+    // The failure is attributed to no specific worker stage — it happened
+    // before the first stage transition.
+    const meta = (job.provider_metadata ?? {}) as { last_failure?: { stage?: string | null } };
+    expect(meta.last_failure?.stage ?? null).toBeNull();
+  });
+
   it("rejects payloads that don't carry a uuid lessonId", async () => {
     const supabase = new FakeSupabase();
     await expect(

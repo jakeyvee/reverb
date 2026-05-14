@@ -10,7 +10,12 @@ import {
 } from "./state.js";
 import { runStage } from "./steps.js";
 import type { PipelineLogger } from "./logger.js";
-import { ProcessLessonPayloadSchema, WORKER_STAGES, type ProcessLessonPayload } from "./types.js";
+import {
+  ProcessLessonPayloadSchema,
+  WORKER_STAGES,
+  type ProcessLessonPayload,
+  type WorkerStage,
+} from "./types.js";
 
 export type RunPipelineInput = {
   supabase: ServiceClient;
@@ -52,10 +57,12 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
     runId: triggerRunId,
   });
 
-  const source = await loadSourceAudio(supabase, payload.lessonId);
-
-  let currentStage = WORKER_STAGES[0];
+  // `currentStage` stays null until we successfully enter the first worker
+  // stage, so a failure inside `loadSourceAudio` is recorded with stage=null
+  // rather than mis-attributed to `transcribing`.
+  let currentStage: WorkerStage | null = null;
   try {
+    const source = await loadSourceAudio(supabase, payload.lessonId);
     for (const stage of WORKER_STAGES) {
       currentStage = stage;
       job = await advanceStatus(supabase, job, stage);
@@ -66,13 +73,13 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
     job = await completeRun(supabase, job);
   } catch (err) {
     const summary = describeError(err);
-    logger.error(`Stage ${currentStage} failed`, {
+    logger.error(`Stage ${currentStage ?? "load_source"} failed`, {
       lessonId: payload.lessonId,
       jobId: job.id,
       stage: currentStage,
       message: summary,
     });
-    await failRun(supabase, job, currentStage ?? null, summary);
+    await failRun(supabase, job, currentStage, summary);
     // Re-throw so Trigger.dev marks the run failed and applies the configured
     // retry policy. The stage is already recorded on the row, so the next
     // attempt resumes from `currentStage`.
