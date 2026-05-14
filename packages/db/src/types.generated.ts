@@ -188,45 +188,51 @@ export type Database = {
         Row: {
           id: string;
           lesson_id: string;
-          kind: Database["public"]["Enums"]["lesson_job_kind"];
-          status: Database["public"]["Enums"]["lesson_job_status"];
-          trigger_run_id: string | null;
+          status: Database["public"]["Enums"]["lesson_processing_status"];
+          idempotency_key: string;
           attempt_count: number;
-          error: string | null;
+          trigger_run_id: string | null;
+          provider_metadata: Json;
           payload: Json;
-          result: Json;
+          error_summary: string | null;
+          queued_at: string;
           started_at: string | null;
           finished_at: string | null;
+          failed_at: string | null;
           created_at: string;
           updated_at: string;
         };
         Insert: {
           id?: string;
           lesson_id: string;
-          kind: Database["public"]["Enums"]["lesson_job_kind"];
-          status?: Database["public"]["Enums"]["lesson_job_status"];
-          trigger_run_id?: string | null;
+          status?: Database["public"]["Enums"]["lesson_processing_status"];
+          idempotency_key: string;
           attempt_count?: number;
-          error?: string | null;
+          trigger_run_id?: string | null;
+          provider_metadata?: Json;
           payload?: Json;
-          result?: Json;
+          error_summary?: string | null;
+          queued_at?: string;
           started_at?: string | null;
           finished_at?: string | null;
+          failed_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
           id?: string;
           lesson_id?: string;
-          kind?: Database["public"]["Enums"]["lesson_job_kind"];
-          status?: Database["public"]["Enums"]["lesson_job_status"];
-          trigger_run_id?: string | null;
+          status?: Database["public"]["Enums"]["lesson_processing_status"];
+          idempotency_key?: string;
           attempt_count?: number;
-          error?: string | null;
+          trigger_run_id?: string | null;
+          provider_metadata?: Json;
           payload?: Json;
-          result?: Json;
+          error_summary?: string | null;
+          queued_at?: string;
           started_at?: string | null;
           finished_at?: string | null;
+          failed_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -234,7 +240,7 @@ export type Database = {
           {
             foreignKeyName: "lesson_jobs_lesson_id_fkey";
             columns: ["lesson_id"];
-            isOneToOne: false;
+            isOneToOne: true;
             referencedRelation: "lessons";
             referencedColumns: ["id"];
           },
@@ -1133,8 +1139,14 @@ export type Database = {
         | "transcript_raw"
         | "transcript_clean"
         | "thumbnail";
-      lesson_job_kind: "transcription" | "extraction" | "clip_generation" | "tts";
-      lesson_job_status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+      lesson_processing_status:
+        | "queued"
+        | "transcribing"
+        | "diarizing"
+        | "extracting"
+        | "generating_audio"
+        | "ready"
+        | "failed";
       extraction_run_kind: "vocab" | "grammar" | "dialogue" | "corrections";
       extraction_run_status: "queued" | "running" | "succeeded" | "failed";
       card_state: "new" | "learning" | "review" | "relearning";

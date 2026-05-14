@@ -13,6 +13,7 @@ import {
   type LessonUploadFinalizeInput,
   type LessonUploadIntentInput,
 } from "@reverb/domain/schemas/upload";
+import { lessonProcessingIdempotencyKey } from "@reverb/domain/schemas/lesson-status";
 import { getUser } from "@/lib/auth/get-user";
 import { getProfile } from "@/lib/auth/get-profile";
 
@@ -171,8 +172,17 @@ export async function finalizeLessonUpload(
 
     const { error: jobError } = await supabase.from("lesson_jobs").insert({
       lesson_id: data.lessonId,
-      kind: "transcription",
       status: "queued",
+      idempotency_key: lessonProcessingIdempotencyKey(data.lessonId),
+      payload: {
+        audio: {
+          bucket: LESSON_AUDIO_BUCKET,
+          storage_path: data.storagePath,
+          mime_type: canonicalMime,
+          byte_size: data.byteSize,
+          duration_ms: data.durationMs,
+        },
+      },
     });
     if (jobError) throw jobError;
   } catch (err) {
@@ -185,6 +195,7 @@ export async function finalizeLessonUpload(
 
   revalidatePath("/upload");
   revalidatePath("/lessons");
+  revalidatePath("/");
 
   return { ok: true, lessonId: data.lessonId };
 }

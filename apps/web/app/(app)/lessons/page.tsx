@@ -3,10 +3,15 @@ import { Card, EmptyState, SectionHeader } from "@/components/ui/card";
 import { DEMO_LESSON } from "@/lib/demo/lesson";
 import { UploadIcon, PlayIcon } from "@/components/ui/icons";
 import { requireUser } from "@/lib/auth/get-user";
+import { LessonStatusList } from "@/components/lessons/lesson-status-list";
+import { loadLessonStatusRows } from "@/lib/lessons/status";
+
+export const dynamic = "force-dynamic";
 
 export default async function LessonsPage() {
   const user = await requireUser();
   const canUpload = user.isVincent;
+  const rows = await loadLessonStatusRows({ limit: 20 });
 
   return (
     <div className="space-y-6">
@@ -62,25 +67,29 @@ export default async function LessonsPage() {
 
       <section>
         <SectionHeader title="Your lessons" />
-        <EmptyState
-          title="No lessons yet"
-          description={
-            canUpload
-              ? "Upload audio, a screenshot, or paste a transcript to generate your first deck."
-              : "Vincent hasn't uploaded a lesson yet. New decks will appear here as soon as they're ready."
-          }
-          action={
-            canUpload ? (
-              <Link
-                href="/upload"
-                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-accent px-3 text-xs font-medium text-accent-foreground transition hover:opacity-90"
-              >
-                <UploadIcon width={14} height={14} />
-                Upload your first lesson
-              </Link>
-            ) : undefined
-          }
-        />
+        {rows.length > 0 ? (
+          <LessonStatusList rows={rows} />
+        ) : (
+          <EmptyState
+            title="No lessons yet"
+            description={
+              canUpload
+                ? "Upload audio, a screenshot, or paste a transcript to generate your first deck."
+                : "Vincent hasn't uploaded a lesson yet. New decks will appear here as soon as they're ready."
+            }
+            action={
+              canUpload ? (
+                <Link
+                  href="/upload"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-md bg-accent px-3 text-xs font-medium text-accent-foreground transition hover:opacity-90"
+                >
+                  <UploadIcon width={14} height={14} />
+                  Upload your first lesson
+                </Link>
+              ) : undefined
+            }
+          />
+        )}
       </section>
     </div>
   );
