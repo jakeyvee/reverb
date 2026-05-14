@@ -28,6 +28,7 @@ packages/
 pnpm install
 cp .env.example .env.local
 cp apps/web/.env.local.example apps/web/.env.local
+cp apps/jobs/.env.local.example apps/jobs/.env.local
 pnpm dev:web
 ```
 
@@ -35,31 +36,36 @@ The web app boots at <http://localhost:3000>.
 
 ## Workspace scripts (run from repo root)
 
-| Script              | Effect                                                      |
-| ------------------- | ----------------------------------------------------------- |
-| `pnpm dev`          | Runs all `dev` tasks across the workspace (web + jobs)      |
-| `pnpm dev:web`      | Just the Next.js app                                        |
-| `pnpm dev:jobs`     | Just the Trigger.dev worker                                 |
-| `pnpm build`        | `turbo run build`                                           |
-| `pnpm typecheck`    | `tsc --noEmit` in every package                             |
-| `pnpm lint`         | ESLint across all workspaces                                |
-| `pnpm test`         | Vitest/Jest (none wired yet) across all workspaces          |
-| `pnpm format`       | Prettier write                                              |
-| `pnpm format:check` | Prettier check (CI-friendly)                                |
-| `pnpm clean`        | Remove build outputs, caches, and `node_modules`            |
+| Script              | Effect                                                 |
+| ------------------- | ------------------------------------------------------ |
+| `pnpm dev`          | Runs all `dev` tasks across the workspace (web + jobs) |
+| `pnpm dev:web`      | Just the Next.js app                                   |
+| `pnpm dev:jobs`     | Just the Trigger.dev worker                            |
+| `pnpm build`        | `turbo run build`                                      |
+| `pnpm typecheck`    | `tsc --noEmit` in every package                        |
+| `pnpm lint`         | ESLint across all workspaces                           |
+| `pnpm test`         | Vitest/Jest (none wired yet) across all workspaces     |
+| `pnpm format`       | Prettier write                                         |
+| `pnpm format:check` | Prettier check (CI-friendly)                           |
+| `pnpm clean`        | Remove build outputs, caches, and `node_modules`       |
 
 Package-scoped commands are also available, e.g. `pnpm --filter @reverb/db db:types` once Supabase
 is connected.
 
 ## Required environment variables
 
-Stub values live in `.env.example` and `apps/web/.env.local.example`. Wire real values before
-running:
+Stub values live in `.env.example`, `apps/web/.env.local.example`, and
+`apps/jobs/.env.local.example`. See [`docs/env-vars.md`](docs/env-vars.md) for
+the full matrix (scope, owner, browser-safety) and
+[`docs/deployment.md`](docs/deployment.md) for how to wire them into Vercel,
+Trigger.dev, and Supabase. At a glance:
 
 - **Supabase** — `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 - **AI providers** — `GROQ_API_KEY`, `ANTHROPIC_API_KEY`
-- **Google TTS** — either `GOOGLE_TTS_API_KEY` or a service-account `GOOGLE_APPLICATION_CREDENTIALS` path
-- **Trigger.dev** — `TRIGGER_API_KEY`, `TRIGGER_PROJECT_ID`
+- **Google TTS** — `GOOGLE_TTS_API_KEY`, or `GOOGLE_APPLICATION_CREDENTIALS_JSON` (Trigger.dev) / `GOOGLE_APPLICATION_CREDENTIALS` (local)
+- **Email** — `RESEND_API_KEY`
+- **Trigger.dev** — `TRIGGER_SECRET_KEY`, `TRIGGER_PROJECT_ID`
+- **App config** — `ALLOWED_EMAILS`, `VINCENT_UPLOAD_EMAIL`, `HOUSEHOLD_TIMEZONE`
 
 ## TypeScript path aliases
 
@@ -87,4 +93,9 @@ pnpm lint
 pnpm test
 pnpm build
 ```
-# reverb
+
+## Deployment
+
+Reverb runs on Vercel (web), Trigger.dev (jobs), and Supabase (DB/Auth/Storage).
+See [`docs/deployment.md`](docs/deployment.md) for the per-system setup walk-through
+and the first-production-launch checklist.

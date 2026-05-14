@@ -3,6 +3,7 @@
   "globalDependencies": [".env", ".env.local", "tsconfig.base.json"],
   "globalEnv": [
     "NODE_ENV",
+    "VERCEL_ENV",
     "NEXT_PUBLIC_SUPABASE_URL",
     "NEXT_PUBLIC_SUPABASE_ANON_KEY",
     "SUPABASE_SERVICE_ROLE_KEY",
@@ -10,8 +11,13 @@
     "ANTHROPIC_API_KEY",
     "GOOGLE_TTS_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
-    "TRIGGER_API_KEY",
-    "TRIGGER_PROJECT_ID"
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+    "RESEND_API_KEY",
+    "TRIGGER_SECRET_KEY",
+    "TRIGGER_PROJECT_ID",
+    "ALLOWED_EMAILS",
+    "VINCENT_UPLOAD_EMAIL",
+    "HOUSEHOLD_TIMEZONE"
   ],
   "tasks": {
     "build": {
