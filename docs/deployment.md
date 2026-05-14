@@ -39,7 +39,10 @@ See [env-vars.md](./env-vars.md) for the variable matrix and ownership.
    ```
 3. Enable the Google OAuth provider: **Auth → Providers → Google**. Paste in
    the OAuth client ID and secret (created in Google Cloud Console with the
-   Supabase callback URL added to the authorized redirects).
+   Supabase callback URL added to the authorized redirects). Also add the web
+   app's `/auth/callback` URL (e.g. `https://reverb.example.com/auth/callback`)
+   to **Auth → URL Configuration → Redirect URLs** so Supabase will redirect
+   the post-OAuth code back to the app.
 4. (Optional) For preview deploys, use Supabase Branching to spin up a
    short-lived DB per Vercel preview, or share a long-lived `reverb-dev`
    project and point all previews at it.

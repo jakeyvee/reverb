@@ -36,6 +36,9 @@ export type Database = {
           avatar_url: string | null;
           locale: string | null;
           timezone: string;
+          reminder_enabled: boolean;
+          reminder_time: string;
+          onboarded_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -46,6 +49,9 @@ export type Database = {
           avatar_url?: string | null;
           locale?: string | null;
           timezone?: string;
+          reminder_enabled?: boolean;
+          reminder_time?: string;
+          onboarded_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -56,6 +62,9 @@ export type Database = {
           avatar_url?: string | null;
           locale?: string | null;
           timezone?: string;
+          reminder_enabled?: boolean;
+          reminder_time?: string;
+          onboarded_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };

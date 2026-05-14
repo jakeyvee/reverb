@@ -1,19 +1,19 @@
 import { readSupabaseEnv } from "@/lib/supabase/env";
+import { GoogleSignInButton } from "./google-button";
 
 type Props = {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; error?: string }>;
 };
 
 export default async function SignInPage({ searchParams }: Props) {
-  const { next } = await searchParams;
+  const { next, error } = await searchParams;
   const configured = Boolean(readSupabaseEnv());
 
   return (
     <div className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
       <h1 className="text-lg font-semibold tracking-tight">Sign in to Reverb</h1>
       <p className="mt-1 text-sm text-foreground-muted">
-        Authentication wiring lands in a follow-up ticket. This screen is the redirect target for
-        protected routes.
+        Reverb is private. Sign in with a Google account on the household allow-list to continue.
       </p>
 
       {!configured ? (
@@ -25,13 +25,15 @@ export default async function SignInPage({ searchParams }: Props) {
         </div>
       ) : null}
 
-      <button
-        type="button"
-        disabled
-        className="mt-6 inline-flex h-10 w-full items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-foreground opacity-60"
-      >
-        Continue with email
-      </button>
+      {error ? (
+        <div className="mt-4 rounded-md border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+          {decodeURIComponent(error)}
+        </div>
+      ) : null}
+
+      <div className="mt-6">
+        <GoogleSignInButton next={next ?? null} />
+      </div>
 
       {next ? (
         <p className="mt-4 truncate text-xs text-foreground-subtle" title={next}>
