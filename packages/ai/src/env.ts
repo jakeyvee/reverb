@@ -8,4 +8,5 @@ export const aiEnv = {
   anthropicApiKey: () => required("ANTHROPIC_API_KEY", process.env.ANTHROPIC_API_KEY),
   googleTtsKey: () => process.env.GOOGLE_TTS_API_KEY ?? null,
   googleAppCredentials: () => process.env.GOOGLE_APPLICATION_CREDENTIALS ?? null,
+  googleAppCredentialsJson: () => process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ?? null,
 };
