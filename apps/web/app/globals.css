@@ -1,5 +1,79 @@
 @import "tailwindcss";
 
-:root {
-  color-scheme: light dark;
+@theme {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-foreground-subtle: var(--foreground-subtle);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Mono", monospace;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0b0d12;
+  --surface: #11141b;
+  --surface-muted: #161a23;
+  --border: #1f2533;
+  --border-strong: #2c3344;
+  --foreground: #e7eaf2;
+  --foreground-muted: #a3a9bb;
+  --foreground-subtle: #6b7184;
+  --accent: #7c8cff;
+  --accent-foreground: #0b0d12;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #f7f8fb;
+  --surface: #ffffff;
+  --surface-muted: #eef0f6;
+  --border: #e2e5ee;
+  --border-strong: #c8cdda;
+  --foreground: #111421;
+  --foreground-muted: #4b5269;
+  --foreground-subtle: #777e93;
+  --accent: #4f5fd5;
+  --accent-foreground: #ffffff;
+  --success: #16a34a;
+  --warning: #ca8a04;
+  --danger: #dc2626;
+}
+
+html,
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  border-color: var(--border);
+}
+
+/* Avoid horizontal overflow on narrow viewports — long words/URLs wrap. */
+body {
+  overflow-x: hidden;
+  word-wrap: break-word;
 }

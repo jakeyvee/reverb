@@ -24,6 +24,9 @@ export const baseConfig = tseslint.config(
       sourceType: "module",
       globals: { ...globals.node, ...globals.es2022 },
     },
+  },
+  {
+    files: ["**/*.{ts,tsx,cts,mts}"],
     rules: {
       "@typescript-eslint/consistent-type-imports": [
         "error",

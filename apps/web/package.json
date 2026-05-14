@@ -17,6 +17,8 @@
     "@reverb/db": "workspace:*",
     "@reverb/domain": "workspace:*",
     "@reverb/srs": "workspace:*",
+    "@supabase/ssr": "^0.5.2",
+    "@supabase/supabase-js": "^2.47.10",
     "next": "^15.1.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
