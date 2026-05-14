@@ -1,0 +1,37 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build outputs
+dist
+build
+.next
+.turbo
+.trigger
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Logs / caches
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+.cache
+
+# Test
+coverage
+
+# Supabase
+**/supabase/.temp
+**/supabase/.branches

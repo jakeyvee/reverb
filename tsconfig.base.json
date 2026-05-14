@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "allowJs": false,
+    "checkJs": false,
+    "jsx": "preserve",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": {
+      "@reverb/ai": ["packages/ai/src/index.ts"],
+      "@reverb/ai/*": ["packages/ai/src/*"],
+      "@reverb/db": ["packages/db/src/index.ts"],
+      "@reverb/db/*": ["packages/db/src/*"],
+      "@reverb/domain": ["packages/domain/src/index.ts"],
+      "@reverb/domain/*": ["packages/domain/src/*"],
+      "@reverb/srs": ["packages/srs/src/index.ts"],
+      "@reverb/srs/*": ["packages/srs/src/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".next", ".turbo"]
+}

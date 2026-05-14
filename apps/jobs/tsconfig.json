@@ -1,0 +1,22 @@
+{
+  "extends": "@reverb/config/tsconfig/node.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@reverb/ai": ["../../packages/ai/src/index.ts"],
+      "@reverb/ai/*": ["../../packages/ai/src/*"],
+      "@reverb/db": ["../../packages/db/src/index.ts"],
+      "@reverb/db/*": ["../../packages/db/src/*"],
+      "@reverb/domain": ["../../packages/domain/src/index.ts"],
+      "@reverb/domain/*": ["../../packages/domain/src/*"],
+      "@reverb/srs": ["../../packages/srs/src/index.ts"],
+      "@reverb/srs/*": ["../../packages/srs/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "trigger.config.ts"],
+  "exclude": ["node_modules", "dist", ".trigger", ".turbo"]
+}
