@@ -2,6 +2,9 @@ import { DailySessionModule } from "@/components/home/daily-session";
 import { CoupleStreaksModule } from "@/components/home/couple-streaks";
 import { HeatmapModule } from "@/components/home/heatmap";
 import { WeeklyXpModule } from "@/components/home/weekly-xp";
+import { LessonsInProgressModule } from "@/components/home/lessons-in-progress";
+
+export const dynamic = "force-dynamic";
 
 export default function HomePage() {
   return (
@@ -15,6 +18,7 @@ export default function HomePage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <DailySessionModule />
+        <LessonsInProgressModule />
         <CoupleStreaksModule />
         <WeeklyXpModule />
         <HeatmapModule />

@@ -9,3 +9,4 @@ export * from "./schemas/practice.js";
 export * from "./schemas/session.js";
 export * from "./schemas/providers.js";
 export * from "./schemas/upload.js";
+export * from "./schemas/lesson-status.js";
