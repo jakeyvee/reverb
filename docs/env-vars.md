@@ -31,7 +31,7 @@ one, add it to the other.
 | `TRIGGER_SECRET_KEY`                  | web (to enqueue)       | NO       | Vercel, `.env.local`                            | platform |
 | `TRIGGER_PROJECT_ID`                  | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | platform |
 | `ALLOWED_EMAILS`                      | web                    | NO       | Vercel, `.env.local`                            | platform |
-| `VINCENT_UPLOAD_EMAIL`                | jobs                   | NO       | Trigger.dev, `.env.local`                       | content  |
+| `VINCENT_UPLOAD_EMAIL`                | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | content  |
 | `HOUSEHOLD_TIMEZONE`                  | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | platform |
 
 ### Notes per variable
@@ -56,7 +56,13 @@ one, add it to the other.
   the launch checklist; see [deployment.md](./deployment.md).
 - **`ALLOWED_EMAILS`** — comma-separated allow-list, e.g.
   `alice@example.com,bob@example.com`. Treated as a server-only secret because
-  it leaks the household roster otherwise.
+  it leaks the household roster otherwise. Compared case-insensitively in
+  middleware and the OAuth callback; an empty value fails closed (no one can
+  sign in).
+- **`VINCENT_UPLOAD_EMAIL`** — single email that identifies Vincent for the
+  upload-only permission. Compared against the signed-in user's email in the
+  web app, and used by `apps/jobs` to address Resend inbound forwards. Must
+  also appear in `ALLOWED_EMAILS`.
 - **`HOUSEHOLD_TIMEZONE`** — IANA name (e.g. `America/Los_Angeles`). Used by
   schedulers for daily rollovers; not browser-public to keep server time-zone
   logic authoritative.

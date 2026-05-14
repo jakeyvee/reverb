@@ -1,32 +1,55 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { refreshSession } from "@/lib/supabase/middleware";
+import { isAllowedEmail } from "@/lib/auth/allowlist";
 
-const PUBLIC_PATHS = new Set(["/sign-in"]);
+const PUBLIC_PATHS = new Set(["/sign-in", "/access-denied"]);
+const AUTH_PATH_PREFIX = "/auth/";
 
 export async function middleware(request: NextRequest) {
-  const { response, userId } = await refreshSession(request);
+  const state = await refreshSession(request);
   const { pathname, search } = request.nextUrl;
 
   const isPublic = PUBLIC_PATHS.has(pathname);
+  // Routes under /auth/ (OAuth callback, sign-out) need to run regardless of
+  // session state — gating them would break the very flow that establishes or
+  // tears down the session.
+  const isAuthRoute = pathname.startsWith(AUTH_PATH_PREFIX);
 
-  if (!userId && !isPublic) {
+  if (isAuthRoute) {
+    return state.getResponse();
+  }
+
+  if (!state.userId) {
+    if (isPublic) return state.getResponse();
     const url = request.nextUrl.clone();
     url.pathname = "/sign-in";
     url.search = "";
     if (pathname !== "/") {
       url.searchParams.set("next", `${pathname}${search}`);
     }
-    return redirectPreservingCookies(url, response);
+    return redirectPreservingCookies(url, state.getResponse());
   }
 
-  if (userId && isPublic) {
+  // Authenticated but not on the allow-list: tear the session down and bounce
+  // to the 403 screen. This is the second layer of defence after the OAuth
+  // callback — if an existing session was created before an email was removed
+  // from ALLOWED_EMAILS, we don't want it to keep working.
+  if (!isAllowedEmail(state.userEmail)) {
+    await state.signOut();
+    const url = request.nextUrl.clone();
+    url.pathname = "/access-denied";
+    url.search = "";
+    return redirectPreservingCookies(url, state.getResponse());
+  }
+
+  if (isPublic) {
     const url = request.nextUrl.clone();
     url.pathname = "/";
     url.search = "";
-    return redirectPreservingCookies(url, response);
+    return redirectPreservingCookies(url, state.getResponse());
   }
 
-  return response;
+  return state.getResponse();
 }
 
 // Carry any Set-Cookie writes (refreshed or cleared auth tokens) from the

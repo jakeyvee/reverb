@@ -2,8 +2,12 @@ import Link from "next/link";
 import { Card, EmptyState, SectionHeader } from "@/components/ui/card";
 import { DEMO_LESSON } from "@/lib/demo/lesson";
 import { UploadIcon, PlayIcon } from "@/components/ui/icons";
+import { requireUser } from "@/lib/auth/get-user";
 
-export default function LessonsPage() {
+export default async function LessonsPage() {
+  const user = await requireUser();
+  const canUpload = user.isVincent;
+
   return (
     <div className="space-y-6">
       <header className="flex items-end justify-between gap-3">
@@ -13,13 +17,15 @@ export default function LessonsPage() {
             Cards generated from your uploads will live here.
           </p>
         </div>
-        <Link
-          href="/upload"
-          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium text-foreground-muted transition hover:bg-surface-muted hover:text-foreground"
-        >
-          <UploadIcon width={14} height={14} />
-          Upload
-        </Link>
+        {canUpload ? (
+          <Link
+            href="/upload"
+            className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium text-foreground-muted transition hover:bg-surface-muted hover:text-foreground"
+          >
+            <UploadIcon width={14} height={14} />
+            Upload
+          </Link>
+        ) : null}
       </header>
 
       <section>
@@ -58,15 +64,21 @@ export default function LessonsPage() {
         <SectionHeader title="Your lessons" />
         <EmptyState
           title="No lessons yet"
-          description="Upload audio, a screenshot, or paste a transcript to generate your first deck."
+          description={
+            canUpload
+              ? "Upload audio, a screenshot, or paste a transcript to generate your first deck."
+              : "Vincent hasn't uploaded a lesson yet. New decks will appear here as soon as they're ready."
+          }
           action={
-            <Link
-              href="/upload"
-              className="inline-flex h-9 items-center gap-1.5 rounded-md bg-accent px-3 text-xs font-medium text-accent-foreground transition hover:opacity-90"
-            >
-              <UploadIcon width={14} height={14} />
-              Upload your first lesson
-            </Link>
+            canUpload ? (
+              <Link
+                href="/upload"
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-accent px-3 text-xs font-medium text-accent-foreground transition hover:opacity-90"
+              >
+                <UploadIcon width={14} height={14} />
+                Upload your first lesson
+              </Link>
+            ) : undefined
           }
         />
       </section>
