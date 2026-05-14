@@ -16,6 +16,7 @@ import {
 import { lessonProcessingIdempotencyKey } from "@reverb/domain/schemas/lesson-status";
 import { getUser } from "@/lib/auth/get-user";
 import { getProfile } from "@/lib/auth/get-profile";
+import { enqueueLessonProcessing } from "@/lib/jobs/enqueue-lesson-processing";
 
 export type PrepareUploadSuccess = {
   ok: true;
@@ -191,6 +192,22 @@ export async function finalizeLessonUpload(
       ok: false,
       error: errorMessage(err) ?? "Could not save the lesson. Please try again.",
     };
+  }
+
+  // Enqueue the long-running processing pipeline on Trigger.dev. Best-effort:
+  // a failure here is logged but doesn't roll back the upload — the
+  // lesson_jobs row stays `queued` and a manual re-dispatch can pick it up.
+  const enqueue = await enqueueLessonProcessing(data.lessonId);
+  if (enqueue.ok && !enqueue.skipped && enqueue.runId) {
+    const { error: tagError } = await supabase
+      .from("lesson_jobs")
+      .update({ trigger_run_id: enqueue.runId })
+      .eq("lesson_id", data.lessonId);
+    if (tagError) {
+      console.error("[upload] could not record trigger_run_id", tagError);
+    }
+  } else if (!enqueue.ok) {
+    console.error("[upload] could not enqueue processing job", enqueue.error);
   }
 
   revalidatePath("/upload");

@@ -34,6 +34,39 @@ pnpm dev:web
 
 The web app boots at <http://localhost:3000>.
 
+## Running the background jobs (Trigger.dev)
+
+Long-running pipeline work (lesson transcription, extraction, TTS) lives in
+`apps/jobs` as Trigger.dev v3 tasks. The web app enqueues runs from server
+actions; the worker process consumes them.
+
+```bash
+# One-time: authenticate against Trigger.dev and link this project.
+pnpm --filter @reverb/jobs exec trigger.dev login
+pnpm --filter @reverb/jobs exec trigger.dev init   # if the project isn't linked yet
+
+# Day-to-day: start the worker in dev mode. The CLI watches src/trigger/,
+# injects TRIGGER_SECRET_KEY / TRIGGER_PROJECT_ID from its credential store,
+# and reads the rest of the env from apps/jobs/.env.local.
+pnpm dev:jobs
+```
+
+In a separate terminal, run `pnpm dev:web` and upload a lesson. The upload
+server action enqueues `processLesson` with the lesson id; the worker walks
+`lesson_jobs.status` through `transcribing → diarizing → extracting →
+generating_audio → ready`. Stage boundaries are visible both in the worker
+console and in the Trigger.dev dashboard under the run for that lesson.
+
+To test failure + resume behaviour, throw inside one of the placeholder steps
+in `apps/jobs/src/lesson-pipeline/steps.ts`, re-run the upload, and watch the
+job stop at the failed stage. Re-enqueuing (or letting Trigger.dev's automatic
+retry fire) resumes from that stage because each step short-circuits when
+`provider_metadata.stages.<stage>` is already marked complete.
+
+If `TRIGGER_SECRET_KEY` isn't set, the upload action still finalises the
+lesson and inserts a `queued` `lesson_jobs` row — the row simply waits for a
+later dispatch. This keeps local web-only development unblocked.
+
 ## Workspace scripts (run from repo root)
 
 | Script              | Effect                                                 |
