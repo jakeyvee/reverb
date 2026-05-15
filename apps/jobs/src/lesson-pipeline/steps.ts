@@ -1,5 +1,5 @@
 import { DIARIZATION_PROMPT_VERSION, EXTRACTION_RUN_KINDS } from "@reverb/ai";
-import type { TablesInsert } from "@reverb/db/types";
+import type { Json, TablesInsert } from "@reverb/db/types";
 import type {
   DiarizationOutput,
   DiarizationSegmentLabel,
@@ -365,15 +365,15 @@ type PreparedVocab = {
   key: string;
   source: ExtractionOutput["new_vocab"][number];
   segmentIds: string[];
-  row: Record<string, unknown>;
+  row: TablesInsert<"vocab_items">;
 };
 
 type ExtractionDerivedWrites = {
   vocab: PreparedVocab[];
-  grammar: Array<Record<string, unknown>>;
-  dialogue: Array<Record<string, unknown>>;
-  corrections: Array<Record<string, unknown>>;
-  runs: Array<Record<string, unknown>>;
+  grammar: Array<TablesInsert<"grammar_patterns">>;
+  dialogue: Array<TablesInsert<"dialogue_clips">>;
+  corrections: Array<TablesInsert<"teacher_corrections">>;
+  runs: Array<TablesInsert<"extraction_runs">>;
 };
 
 function buildExtractionWrites(args: {
@@ -412,16 +412,16 @@ function buildExtractionWrites(args: {
   const runs = EXTRACTION_RUN_KINDS.map((kind) => ({
     lesson_id: args.lesson.id,
     kind,
-    status: "succeeded",
+    status: "succeeded" as const,
     model: args.model,
     prompt_version: args.promptVersion,
-    input,
+    input: input as Json,
     output: extractionOutputForKind(args.extraction, kind),
     error: null,
     cost_cents: null,
     started_at: args.extractedAt,
     finished_at: args.extractedAt,
-  }));
+  })) satisfies Array<TablesInsert<"extraction_runs">>;
 
   return { vocab, grammar, dialogue, corrections, runs };
 }
@@ -454,17 +454,49 @@ async function persistLessonOwnedRows(
   supabase: ServiceClient,
   writes: Pick<ExtractionDerivedWrites, "grammar" | "dialogue" | "corrections" | "runs">,
 ): Promise<void> {
-  for (const [table, rows] of [
-    ["grammar_patterns", writes.grammar],
-    ["dialogue_clips", writes.dialogue],
-    ["teacher_corrections", writes.corrections],
-    ["extraction_runs", writes.runs],
-  ] as const) {
-    if (rows.length === 0) continue;
-    const { error } = await supabase.from(table).insert(rows);
-    if (error) {
-      throw new Error(`Could not persist ${table}: ${error.message}`);
-    }
+  await insertRows(supabase, "grammar_patterns", writes.grammar);
+  await insertRows(supabase, "dialogue_clips", writes.dialogue);
+  await insertRows(supabase, "teacher_corrections", writes.corrections);
+  await insertRows(supabase, "extraction_runs", writes.runs);
+}
+
+async function insertRows(
+  supabase: ServiceClient,
+  table: "grammar_patterns",
+  rows: Array<TablesInsert<"grammar_patterns">>,
+): Promise<void>;
+async function insertRows(
+  supabase: ServiceClient,
+  table: "dialogue_clips",
+  rows: Array<TablesInsert<"dialogue_clips">>,
+): Promise<void>;
+async function insertRows(
+  supabase: ServiceClient,
+  table: "teacher_corrections",
+  rows: Array<TablesInsert<"teacher_corrections">>,
+): Promise<void>;
+async function insertRows(
+  supabase: ServiceClient,
+  table: "extraction_runs",
+  rows: Array<TablesInsert<"extraction_runs">>,
+): Promise<void>;
+async function insertRows(
+  supabase: ServiceClient,
+  table:
+    | "grammar_patterns"
+    | "dialogue_clips"
+    | "teacher_corrections"
+    | "extraction_runs",
+  rows:
+    | Array<TablesInsert<"grammar_patterns">>
+    | Array<TablesInsert<"dialogue_clips">>
+    | Array<TablesInsert<"teacher_corrections">>
+    | Array<TablesInsert<"extraction_runs">>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const { error } = await supabase.from(table).insert(rows as never);
+  if (error) {
+    throw new Error(`Could not persist ${table}: ${error.message}`);
   }
 }
 
@@ -726,7 +758,7 @@ function buildGrammarRow(
   },
   item: ExtractionOutput["grammar_patterns"][number],
   promptById: Map<string, SegmentForExtraction>,
-): Record<string, unknown> {
+): TablesInsert<"grammar_patterns"> {
   const sourceSegments = resolveSourceSegments(
     item.sourceSegmentIds,
     promptById,
@@ -757,7 +789,7 @@ function buildDialogueRow(
   },
   item: ExtractionOutput["dialogue_clips"][number],
   promptById: Map<string, SegmentForExtraction>,
-): Record<string, unknown> {
+): TablesInsert<"dialogue_clips"> {
   const start = resolvePromptSegment(item.startSegmentId, promptById, `dialogue clip "${item.id}" startSegmentId`);
   const end = resolvePromptSegment(item.endSegmentId, promptById, `dialogue clip "${item.id}" endSegmentId`);
   if (start.segment_index > end.segment_index) {
@@ -810,7 +842,7 @@ function buildCorrectionRow(
   },
   item: ExtractionOutput["teacher_corrections"][number],
   promptById: Map<string, SegmentForExtraction>,
-): Record<string, unknown> {
+): TablesInsert<"teacher_corrections"> {
   const segment = resolvePromptSegment(item.segmentId, promptById, `teacher correction for "${item.utterance}"`);
   return {
     household_id: args.lesson.household_id,
@@ -838,7 +870,7 @@ function buildCorrectionRow(
 function extractionOutputForKind(
   extraction: ExtractionOutput,
   kind: (typeof EXTRACTION_RUN_KINDS)[number],
-): Record<string, unknown> {
+): Json {
   switch (kind) {
     case "vocab":
       return { new_vocab: extraction.new_vocab };
@@ -897,7 +929,7 @@ function extractionMetadata(args: {
   sourceSegmentIds: string[];
   kind: "vocab" | "grammar" | "dialogue" | "corrections";
   extra?: Record<string, unknown>;
-}): Record<string, unknown> {
+}): Json {
   return {
     model: args.model,
     prompt_version: args.promptVersion,
