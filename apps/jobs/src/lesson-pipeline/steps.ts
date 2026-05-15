@@ -591,6 +591,10 @@ function buildCorrectionRow(
     source_text: item.utterance,
     corrected_text: item.correction,
     explanation: item.rationale ?? null,
+    // `confidence` lands on the column (VOL-120 migration) so the session
+    // selector can filter without re-parsing metadata. NULL means
+    // "unscored" — older runs and any LLM response that omits the field.
+    confidence: item.confidence ?? null,
     metadata: extractionMetadata({
       model: args.model,
       promptVersion: args.promptVersion,
@@ -601,6 +605,7 @@ function buildCorrectionRow(
         studentSpeaker: item.studentSpeaker,
         category: item.category,
         severity: item.severity ?? null,
+        confidence: item.confidence ?? null,
       },
     }),
   };
