@@ -352,4 +352,109 @@ describe("runLessonPipeline retry integration", () => {
     // stage and any later stages execute.
     expect(stageCalls).toEqual(["extracting", "generating_audio"]);
   });
+
+  it("clears partial diarization labels before retrying a failed diarizing stage", async () => {
+    const supabase = new FakeSupabase();
+    seed(supabase);
+    let failDiarizing = true;
+
+    const transcribingStep: StepHandler = async ({ supabase, job }) => {
+      await (supabase as unknown as FakeSupabase).from("transcript_segments").upsert(
+        [
+          {
+            id: `seg-${job.lesson_id}-0`,
+            lesson_id: job.lesson_id,
+            segment_index: 0,
+            start_ms: 0,
+            end_ms: 1000,
+            speaker: null,
+            language: null,
+            text: "first segment",
+            metadata: {},
+            created_at: new Date().toISOString(),
+          },
+          {
+            id: `seg-${job.lesson_id}-1`,
+            lesson_id: job.lesson_id,
+            segment_index: 1,
+            start_ms: 1000,
+            end_ms: 2000,
+            speaker: null,
+            language: null,
+            text: "second segment",
+            metadata: {},
+            created_at: new Date().toISOString(),
+          },
+        ],
+        { onConflict: "lesson_id,segment_index", ignoreDuplicates: false },
+      );
+      return { details: { segments: 2 } };
+    };
+
+    const diarizingStep: StepHandler = async ({ supabase, job }) => {
+      if (failDiarizing) {
+        failDiarizing = false;
+        await supabase
+          .from("transcript_segments")
+          .update({
+            speaker: "teacher",
+            speaker_confidence: 0.9,
+            speaker_notes: "partial failed attempt",
+            speaker_low_priority: true,
+          })
+          .eq("id", `seg-${job.lesson_id}-0`);
+        throw new Error("provider dropped connection");
+      }
+
+      await supabase
+        .from("transcript_segments")
+        .update({
+          speaker: "student_vincent",
+          speaker_confidence: 0.8,
+          speaker_notes: null,
+          speaker_low_priority: false,
+        })
+        .eq("id", `seg-${job.lesson_id}-1`);
+      return { details: { labels: 1 } };
+    };
+
+    const steps: StepHandlerMap = {
+      transcribing: transcribingStep,
+      diarizing: diarizingStep,
+      extracting: async () => ({ details: {} }),
+      generating_audio: async () => ({ details: {} }),
+    };
+
+    await expect(
+      runLessonPipeline({
+        supabase: asClient(supabase),
+        payload: { lessonId: LESSON_ID },
+        triggerRunId: "run_partial_diarize",
+        logger: noopLogger,
+        steps,
+      }),
+    ).rejects.toThrow(/provider dropped connection/);
+
+    const stale = supabase.transcriptSegments.find((s) => s.id === `seg-${LESSON_ID}-0`);
+    expect(stale?.speaker).toBe("teacher");
+    expect(stale?.speaker_low_priority).toBe(true);
+
+    await runLessonPipeline({
+      supabase: asClient(supabase),
+      payload: { lessonId: LESSON_ID },
+      triggerRunId: "run_partial_diarize_retry",
+      logger: noopLogger,
+      steps,
+    });
+
+    const segments = [...supabase.transcriptSegments].sort(
+      (a, b) => a.segment_index - b.segment_index,
+    );
+    expect(segments[0]?.speaker).toBeNull();
+    expect(segments[0]?.speaker_confidence).toBeNull();
+    expect(segments[0]?.speaker_notes).toBeNull();
+    expect(segments[0]?.speaker_low_priority).toBe(false);
+    expect(segments[1]?.speaker).toBe("student_vincent");
+    expect(segments[1]?.speaker_confidence).toBeCloseTo(0.8);
+  });
 });

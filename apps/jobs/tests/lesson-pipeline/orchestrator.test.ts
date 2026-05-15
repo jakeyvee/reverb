@@ -10,9 +10,11 @@ import { noopLogger } from "../../src/lesson-pipeline/logger.js";
 import { FakeSupabase } from "./fake-supabase.js";
 
 // Tests inject this stub so they can drive the orchestrator without booting
-// the real Groq Whisper adapter. The transcript is intentionally empty: the
-// stages just need to walk forward; per-row persistence is covered separately
-// by `transcribing.test.ts`.
+// the real Groq Whisper / Anthropic adapters. The transcript is intentionally
+// empty: the stages just need to walk forward; per-row persistence is covered
+// separately by `transcribing.test.ts` and `diarizing.test.ts`. The diarize
+// stub returns no labels, which is exactly what the diarizing step expects
+// when the transcript carries no segments.
 function stubServices(): PipelineServices {
   return {
     transcribe: async ({ sourceId, language }) => {
@@ -28,6 +30,18 @@ function stubServices(): PipelineServices {
       };
       return { transcript, rawResponse: { text: "" }, model: "whisper-large-v3" };
     },
+    diarize: async ({ sourceTranscriptId }) => ({
+      diarization: {
+        schemaVersion: SCHEMA_VERSIONS.diarization,
+        promptVersion: "stub",
+        model: "stub",
+        sourceTranscriptId,
+        segments: [],
+      },
+      rawResponse: "{}",
+      model: "stub",
+      promptVersion: "stub",
+    }),
   };
 }
 

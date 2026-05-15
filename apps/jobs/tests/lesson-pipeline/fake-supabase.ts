@@ -100,6 +100,9 @@ export class FakeSupabase {
       return {
         id: row.id ?? randomUUID(),
         metadata: {},
+        speaker_confidence: null,
+        speaker_notes: null,
+        speaker_low_priority: false,
         created_at: now,
         ...row,
       };

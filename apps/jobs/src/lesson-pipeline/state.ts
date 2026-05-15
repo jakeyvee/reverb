@@ -283,9 +283,22 @@ const STAGE_RESET_HOOKS: Record<WorkerStage, StageResetHook> = {
     // there's nothing to delete; leaving the rows in place keeps any review-
     // clip storage paths that already point at them stable.
   },
-  diarizing: async () => {
-    // Diarization mutates `speaker` on existing transcript_segments rows in
-    // place; nothing to clean up here.
+  diarizing: async (supabase, lessonId) => {
+    // Diarization updates segment rows one by one. If a provider or DB error
+    // interrupts the stage, a retry must not combine stale labels from the
+    // failed attempt with a fresh LLM response.
+    const { error } = await supabase
+      .from("transcript_segments")
+      .update({
+        speaker: null,
+        speaker_confidence: null,
+        speaker_notes: null,
+        speaker_low_priority: false,
+      })
+      .eq("lesson_id", lessonId);
+    if (error) {
+      throw new Error(`Could not reset diarization labels for lesson ${lessonId}: ${error.message}`);
+    }
   },
   extracting: async (supabase, lessonId) => {
     const { error } = await supabase.from("extraction_runs").delete().eq("lesson_id", lessonId);

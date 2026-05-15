@@ -254,6 +254,9 @@ export type Database = {
           start_ms: number;
           end_ms: number;
           speaker: string | null;
+          speaker_confidence: number | null;
+          speaker_notes: string | null;
+          speaker_low_priority: boolean;
           language: string | null;
           text: string;
           metadata: Json;
@@ -266,6 +269,9 @@ export type Database = {
           start_ms: number;
           end_ms: number;
           speaker?: string | null;
+          speaker_confidence?: number | null;
+          speaker_notes?: string | null;
+          speaker_low_priority?: boolean;
           language?: string | null;
           text: string;
           metadata?: Json;
@@ -278,6 +284,9 @@ export type Database = {
           start_ms?: number;
           end_ms?: number;
           speaker?: string | null;
+          speaker_confidence?: number | null;
+          speaker_notes?: string | null;
+          speaker_low_priority?: boolean;
           language?: string | null;
           text?: string;
           metadata?: Json;
