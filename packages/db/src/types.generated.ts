@@ -1083,11 +1083,13 @@ export type Database = {
         Row: {
           id: string;
           user_id: string;
+          lesson_id: string | null;
           kind: Database["public"]["Enums"]["notification_event_kind"];
           channel: Database["public"]["Enums"]["notification_channel"];
           status: Database["public"]["Enums"]["notification_status"];
           scheduled_for: string | null;
           sent_at: string | null;
+          read_at: string | null;
           payload: Json;
           error: string | null;
           created_at: string;
@@ -1096,11 +1098,13 @@ export type Database = {
         Insert: {
           id?: string;
           user_id: string;
+          lesson_id?: string | null;
           kind: Database["public"]["Enums"]["notification_event_kind"];
           channel: Database["public"]["Enums"]["notification_channel"];
           status?: Database["public"]["Enums"]["notification_status"];
           scheduled_for?: string | null;
           sent_at?: string | null;
+          read_at?: string | null;
           payload?: Json;
           error?: string | null;
           created_at?: string;
@@ -1109,17 +1113,27 @@ export type Database = {
         Update: {
           id?: string;
           user_id?: string;
+          lesson_id?: string | null;
           kind?: Database["public"]["Enums"]["notification_event_kind"];
           channel?: Database["public"]["Enums"]["notification_channel"];
           status?: Database["public"]["Enums"]["notification_status"];
           scheduled_for?: string | null;
           sent_at?: string | null;
+          read_at?: string | null;
           payload?: Json;
           error?: string | null;
           created_at?: string;
           updated_at?: string;
         };
-        Relationships: [];
+        Relationships: [
+          {
+            foreignKeyName: "notification_events_lesson_id_fkey";
+            columns: ["lesson_id"];
+            isOneToOne: false;
+            referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+        ];
       };
     };
     Views: {
@@ -1164,8 +1178,13 @@ export type Database = {
         | "item_skipped"
         | "pause"
         | "resume";
-      notification_event_kind: "streak_reminder" | "session_due" | "lesson_ready" | "milestone";
-      notification_channel: "push" | "email";
+      notification_event_kind:
+        | "streak_reminder"
+        | "session_due"
+        | "lesson_ready"
+        | "lesson_failed"
+        | "milestone";
+      notification_channel: "push" | "email" | "in_app";
       notification_status: "queued" | "sent" | "failed" | "cancelled";
     };
     CompositeTypes: {
