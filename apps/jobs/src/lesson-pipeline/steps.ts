@@ -11,6 +11,7 @@ import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
 import type { PipelineLogger } from "./logger.js";
 import type { PipelineServices } from "./services.js";
+import { materializeDialogueClips } from "./clip-generation.js";
 import { WORKER_STAGES, type WorkerStage } from "./types.js";
 
 // Each stage handler is the seam where the real provider integration lives.
@@ -880,13 +881,31 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
   };
 }
 
-async function generatingAudioStep({ logger }: StepContext): Promise<StepResult> {
-  // Placeholder for review-clip generation via Google TTS. The real step will
-  // write clip objects to the lesson-clips bucket at a deterministic path
-  // (`{householdId}/{lessonId}/clips/{cardId}.mp3`) so a re-run overwrites
-  // rather than duplicating.
-  logger.info("Audio generation placeholder — would synthesise per-card review clips");
-  return { details: { placeholder: true } };
+async function generatingAudioStep(ctx: StepContext): Promise<StepResult> {
+  const { supabase, source, services, logger, job } = ctx;
+  // VOL-126 covers the source-audio side of clip generation: dialogue clips
+  // extracted during the extracting stage have stable storage paths but no
+  // underlying object yet. We materialise those here. Per-card TTS audio (the
+  // synthetic-speech leg) is filled in by a separate downstream step that
+  // writes into `vocab_items.audio_storage_path`; it is intentionally outside
+  // the scope of this ticket and slotted into the same stage so the pipeline
+  // shape stays unchanged.
+  const result = await materializeDialogueClips({
+    supabase,
+    lessonId: job.lesson_id,
+    source,
+    logger,
+    mediaTools: services.mediaTools,
+  });
+
+  return {
+    details: {
+      dialogue_clip_total: result.totalCount,
+      dialogue_clip_materialized: result.materializedCount,
+      dialogue_clip_skipped: result.skippedCount,
+      dialogue_clip_skips: result.skipped,
+    },
+  };
 }
 
 export type StepHandlerMap = Record<WorkerStage, StepHandler>;

@@ -5,6 +5,7 @@
 // Keeping the fake in tests/ rather than dressing it up as a full mock keeps
 // it obvious which paths are exercised. If a future code change reaches for a
 // new method, the fake will throw at test time and we'll add it explicitly.
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import type { Tables } from "@reverb/db/types";
 
@@ -53,6 +54,18 @@ export class FakeSupabase {
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
+  // Object body served by `storage.from(bucket).download(path)` calls. When a
+  // test stages a download (e.g. for clip materialization), it preloads bytes
+  // here keyed by `${bucket}:${path}`. Unknown keys return a 404-shaped error.
+  storageObjects: Map<string, Buffer> = new Map();
+  // Records every upload the worker pushes through `storage.from(b).upload(p, …)`.
+  storageUploads: Array<{
+    bucket: string;
+    path: string;
+    bytes: Buffer;
+    contentType?: string;
+    upsert?: boolean;
+  }> = [];
   // Toggle to simulate a step failure on the n-th update to the jobs table.
   failOnNextUpdate: { whenStatus?: string; count?: number } | null = null;
 
@@ -92,6 +105,35 @@ export class FakeSupabase {
       createSignedUrl: async (path: string, ttl: number) => {
         this.signedUrlRequests.push({ bucket, path, ttl });
         return { data: { signedUrl: `https://fake/${bucket}/${path}?ttl=${ttl}` }, error: null };
+      },
+      download: async (path: string) => {
+        const key = `${bucket}:${path}`;
+        const body = this.storageObjects.get(key);
+        if (!body) {
+          return { data: null, error: { message: `object not found: ${key}` } };
+        }
+        return {
+          data: {
+            arrayBuffer: async () =>
+              body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+          },
+          error: null,
+        };
+      },
+      upload: async (
+        path: string,
+        body: ArrayBufferView | ArrayBuffer | Buffer,
+        opts?: { contentType?: string; upsert?: boolean },
+      ) => {
+        const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body as ArrayBuffer);
+        this.storageUploads.push({
+          bucket,
+          path,
+          bytes: buffer,
+          contentType: opts?.contentType,
+          upsert: opts?.upsert,
+        });
+        return { data: { id: path, path, fullPath: `${bucket}/${path}` }, error: null };
       },
     }),
   };

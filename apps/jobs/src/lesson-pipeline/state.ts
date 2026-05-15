@@ -326,10 +326,11 @@ const STAGE_RESET_HOOKS: Record<WorkerStage, StageResetHook> = {
     }
   },
   generating_audio: async () => {
-    // The TTS step writes clips to deterministic storage paths
-    // (`{householdId}/{lessonId}/clips/{cardId}.mp3`) and updates
-    // vocab_items.audio_storage_path in place. A retry overwrites the object
-    // and the row, so we do not need to clean anything up here.
+    // Clip materialization (VOL-126) and the future per-card TTS pass both
+    // write to deterministic storage paths under the lesson-clips bucket and
+    // update existing rows in place. The Supabase upload uses upsert=true so
+    // a retry overwrites the prior attempt's object, and dialogue_clips rows
+    // are UPDATEd by id rather than re-inserted. Nothing to clean up here.
   },
 };
 

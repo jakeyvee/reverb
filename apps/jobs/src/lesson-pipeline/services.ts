@@ -12,6 +12,7 @@ import {
   type TranscribeAudioInput,
   type TranscribeAudioResult,
 } from "@reverb/ai";
+import type { MediaToolOptions } from "./media.js";
 
 export type Transcriber = (input: TranscribeAudioInput) => Promise<TranscribeAudioResult>;
 export type Diarizer = (input: InferDiarizationInput) => Promise<InferDiarizationResult>;
@@ -21,6 +22,11 @@ export type PipelineServices = {
   transcribe: Transcriber;
   diarize: Diarizer;
   extract: Extractor;
+  // Optional ffmpeg/ffprobe overrides for the clip-generation step. Production
+  // leaves it unset (the helpers in @reverb/media auto-resolve the static
+  // binary); tests inject a fake runner so the orchestrator can be exercised
+  // without spawning a real ffmpeg.
+  mediaTools?: MediaToolOptions;
 };
 
 export function defaultPipelineServices(): PipelineServices {
