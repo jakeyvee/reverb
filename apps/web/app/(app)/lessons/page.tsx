@@ -68,7 +68,7 @@ export default async function LessonsPage() {
       <section>
         <SectionHeader title="Your lessons" />
         {rows.length > 0 ? (
-          <LessonStatusList rows={rows} />
+          <LessonStatusList rows={rows} canRetry={canUpload} />
         ) : (
           <EmptyState
             title="No lessons yet"

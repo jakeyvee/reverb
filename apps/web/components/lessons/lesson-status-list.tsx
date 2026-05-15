@@ -9,23 +9,35 @@ type Props = {
   // When true, render the inline hint and retry affordance. Compact mode is
   // used on the Home dashboard where space is tighter.
   showDetail?: boolean;
+  // Only Vincent (the upload account) can re-enqueue processing. Partner
+  // accounts still see the failure card so practice from existing content
+  // isn't blocked — they just can't drive the retry themselves.
+  canRetry?: boolean;
 };
 
-export function LessonStatusList({ rows, showDetail = true }: Props) {
+export function LessonStatusList({ rows, showDetail = true, canRetry = false }: Props) {
   if (rows.length === 0) return null;
 
   return (
     <ul className="space-y-2">
       {rows.map((row) => (
         <li key={row.id}>
-          <LessonStatusItem row={row} showDetail={showDetail} />
+          <LessonStatusItem row={row} showDetail={showDetail} canRetry={canRetry} />
         </li>
       ))}
     </ul>
   );
 }
 
-function LessonStatusItem({ row, showDetail }: { row: LessonStatusRow; showDetail: boolean }) {
+function LessonStatusItem({
+  row,
+  showDetail,
+  canRetry,
+}: {
+  row: LessonStatusRow;
+  showDetail: boolean;
+  canRetry: boolean;
+}) {
   const { processingStatus: status } = row;
   const isFailed = status === "failed";
   const hint = lessonStatusHint(status);
@@ -40,6 +52,7 @@ function LessonStatusItem({ row, showDetail }: { row: LessonStatusRow; showDetai
             {formatRelative(row.createdAt)}
             {row.durationMs ? ` · ${formatDuration(row.durationMs)}` : ""}
             {row.attemptCount > 0 && inFlight ? ` · attempt ${row.attemptCount + 1}` : ""}
+            {row.attemptCount > 1 && isFailed ? ` · ${row.attemptCount} attempts` : ""}
           </p>
         </div>
         <LessonStatusBadge status={status} />
@@ -53,7 +66,7 @@ function LessonStatusItem({ row, showDetail }: { row: LessonStatusRow; showDetai
               {row.errorSummary ?? "We couldn't finish this lesson. Please try again."}
             </p>
           </div>
-          <RetryButton lessonId={row.id} />
+          {canRetry ? <RetryButton lessonId={row.id} /> : null}
         </div>
       ) : null}
 
