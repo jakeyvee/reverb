@@ -301,19 +301,14 @@ const STAGE_RESET_HOOKS: Record<WorkerStage, StageResetHook> = {
     }
   },
   extracting: async (supabase, lessonId) => {
-    // Wipe every derived row the extraction step writes for this lesson so a
-    // retry replaces the previous attempt rather than appending duplicates.
-    // Order matters: grammar_exercises FK-cascades from grammar_patterns, and
-    // cards/user_known_words cascade from vocab_items, so deleting the parents
-    // is enough — but we still scope by lesson_id rather than truncating.
-    //
-    // Safety: this only runs when the orchestrator is resuming a `failed`
-    // job (see `runLessonPipeline`). A successful re-entry short-circuits
-    // before reaching this hook, so a user who has already started
-    // practicing cannot have their cards wiped by a re-run.
+    // Wipe the lesson-owned derived rows so the retried extraction replaces
+    // the previous attempt rather than appending duplicates. `vocab_items`
+    // is intentionally excluded — vocab is household-shared and the
+    // extraction step reconciles it via dedupe + upsert, so leaving the
+    // existing rows in place lets per-user `cards` (and any FSRS history
+    // attached to them) survive the retry.
     const tables = [
       "extraction_runs",
-      "vocab_items",
       "grammar_patterns",
       "dialogue_clips",
       "teacher_corrections",

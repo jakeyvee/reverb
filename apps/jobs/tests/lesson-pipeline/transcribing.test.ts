@@ -49,6 +49,34 @@ function buildFile(): Tables<"lesson_files"> {
   };
 }
 
+function buildLesson(): Tables<"lessons"> {
+  const now = new Date(0).toISOString();
+  return {
+    id: LESSON_ID,
+    household_id: HOUSEHOLD_ID,
+    title: "Transcribing fixture lesson",
+    description: null,
+    source_language: null,
+    target_language: null,
+    recorded_at: null,
+    status: "processing",
+    duration_ms: 60_000,
+    metadata: {},
+    created_by: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+// Seed the orchestrator's prerequisites so it can walk past transcribing into
+// the downstream stages without tripping over the lesson / profile lookups
+// the extracting step performs.
+function seedLessonContext(supabase: FakeSupabase) {
+  supabase.insertJob(buildJob());
+  supabase.insertFile(buildFile());
+  supabase.insertLesson(buildLesson());
+}
+
 function asClient(supabase: FakeSupabase): ServiceClient {
   return supabase as unknown as ServiceClient;
 }
@@ -139,14 +167,31 @@ function fixtureServices(): PipelineServices {
       model: "stub",
       promptVersion: "stub",
     }),
+    // Extraction returns no vocab/grammar/etc — these tests are about the
+    // transcribing stage; the empty payload lets the orchestrator finish
+    // without exercising the Anthropic call or the per-user card writes.
+    extract: async ({ sourceTranscriptId, language }) => ({
+      extraction: {
+        schemaVersion: SCHEMA_VERSIONS.extractionOutput,
+        promptVersion: "extract-v1",
+        language,
+        sourceTranscriptId,
+        new_vocab: [],
+        grammar_patterns: [],
+        dialogue_clips: [],
+        teacher_corrections: [],
+      },
+      rawResponse: "{}",
+      model: "stub",
+      promptVersion: "extract-v1",
+    }),
   };
 }
 
 describe("transcribing stage", () => {
   it("persists segments and word timestamps from the adapter output", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const result = await runLessonPipeline({
       supabase: asClient(supabase),
@@ -192,8 +237,7 @@ describe("transcribing stage", () => {
 
   it("records the raw provider payload on the job for audit", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     await runLessonPipeline({
       supabase: asClient(supabase),
@@ -218,8 +262,7 @@ describe("transcribing stage", () => {
 
   it("captures provider failures on the job row without losing the raw upload", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
     const failingServices: PipelineServices = {
       transcribe: async () => {
         throw new Error("groq returned 503");
@@ -249,8 +292,7 @@ describe("transcribing stage", () => {
 
   it("handles transcripts that ship segments but no word timestamps", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const noWords: Transcript = {
       ...fixtureTranscript(),

@@ -54,6 +54,34 @@ function buildFile(): Tables<"lesson_files"> {
   };
 }
 
+function buildLesson(): Tables<"lessons"> {
+  const now = new Date(0).toISOString();
+  return {
+    id: LESSON_ID,
+    household_id: HOUSEHOLD_ID,
+    title: "Diarization fixture lesson",
+    description: null,
+    source_language: null,
+    target_language: null,
+    recorded_at: null,
+    status: "processing",
+    duration_ms: 60_000,
+    metadata: {},
+    created_by: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+// Seed everything the orchestrator needs to walk past diarizing into the
+// downstream stages without tripping the lesson / profile lookups in
+// extracting.
+function seedLessonContext(supabase: FakeSupabase) {
+  supabase.insertJob(buildJob());
+  supabase.insertFile(buildFile());
+  supabase.insertLesson(buildLesson());
+}
+
 function asClient(supabase: FakeSupabase): ServiceClient {
   return supabase as unknown as ServiceClient;
 }
@@ -133,14 +161,30 @@ function buildServices(diarizeStub: DiarizeStub): PipelineServices & {
       model: "whisper-large-v3",
     }),
     diarize,
+    // Empty extraction stub so the orchestrator finishes without hitting the
+    // real Anthropic call; this file's tests are about the diarizing stage.
+    extract: async ({ sourceTranscriptId, language }) => ({
+      extraction: {
+        schemaVersion: SCHEMA_VERSIONS.extractionOutput,
+        promptVersion: "extract-v1",
+        language,
+        sourceTranscriptId,
+        new_vocab: [],
+        grammar_patterns: [],
+        dialogue_clips: [],
+        teacher_corrections: [],
+      },
+      rawResponse: "{}",
+      model: "stub",
+      promptVersion: "extract-v1",
+    }),
   };
 }
 
 describe("diarizing stage", () => {
   it("labels each transcript segment without overwriting the original ASR text", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const services = buildServices((input) => ({
       schemaVersion: SCHEMA_VERSIONS.diarization,
@@ -212,8 +256,7 @@ describe("diarizing stage", () => {
 
   it("stores prompt + model version on the job for future reprocessing", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const services = buildServices((input) => ({
       schemaVersion: SCHEMA_VERSIONS.diarization,
@@ -250,8 +293,7 @@ describe("diarizing stage", () => {
 
   it("handles ambiguous segments by recording 'unknown' without failing the lesson", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const services = buildServices((input) => ({
       schemaVersion: SCHEMA_VERSIONS.diarization,
@@ -297,8 +339,7 @@ describe("diarizing stage", () => {
 
   it("leaves segments missing from the LLM response unchanged so a partial response cannot blank prior labels", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const services = buildServices((input) => ({
       schemaVersion: SCHEMA_VERSIONS.diarization,
@@ -338,8 +379,7 @@ describe("diarizing stage", () => {
 
   it("captures provider failures without losing the persisted transcript", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const services: PipelineServices = {
       transcribe: async () => ({
@@ -377,8 +417,7 @@ describe("diarizing stage", () => {
 
   it("skips the LLM call entirely when the transcript has zero segments", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seedLessonContext(supabase);
 
     const diarize = vi.fn();
     const services: PipelineServices = {

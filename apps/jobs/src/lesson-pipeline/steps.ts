@@ -1,4 +1,5 @@
 import { DIARIZATION_PROMPT_VERSION, EXTRACTION_RUN_KINDS } from "@reverb/ai";
+import type { TablesInsert } from "@reverb/db/types";
 import type {
   DiarizationOutput,
   DiarizationSegmentLabel,
@@ -6,6 +7,7 @@ import type {
   SpeakerLabel,
   Transcript,
 } from "@reverb/domain";
+import { normalizeLemma, normalizeReading, vocabDedupeKey } from "@reverb/domain";
 import { LESSON_CLIPS_BUCKET, dialogueClipPath } from "@reverb/media";
 import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
@@ -359,6 +361,21 @@ function buildExtractionPromptSegments(segments: SegmentForExtraction[]): Array<
   }));
 }
 
+type PreparedVocab = {
+  key: string;
+  source: ExtractionOutput["new_vocab"][number];
+  segmentIds: string[];
+  row: Record<string, unknown>;
+};
+
+type ExtractionDerivedWrites = {
+  vocab: PreparedVocab[];
+  grammar: Array<Record<string, unknown>>;
+  dialogue: Array<Record<string, unknown>>;
+  corrections: Array<Record<string, unknown>>;
+  runs: Array<Record<string, unknown>>;
+};
+
 function buildExtractionWrites(args: {
   lesson: LessonForExtraction;
   segments: SegmentForExtraction[];
@@ -366,17 +383,11 @@ function buildExtractionWrites(args: {
   model: string;
   promptVersion: string;
   extractedAt: string;
-}): {
-  vocab: Array<Record<string, unknown>>;
-  grammar: Array<Record<string, unknown>>;
-  dialogue: Array<Record<string, unknown>>;
-  corrections: Array<Record<string, unknown>>;
-  runs: Array<Record<string, unknown>>;
-} {
+}): ExtractionDerivedWrites {
   const promptById = new Map(args.segments.map((segment) => [promptSegmentId(segment), segment]));
   const vocab = uniqueBy(
-    args.extraction.new_vocab.map((item) => buildVocabRow(args, item, promptById)),
-    (row) => `${String(row.lemma).toLowerCase()}|${String(row.reading ?? "")}`,
+    args.extraction.new_vocab.map((item) => buildPreparedVocab(args, item, promptById)),
+    (entry) => entry.key,
   );
   const grammar = uniqueBy(
     args.extraction.grammar_patterns.map((item) => buildGrammarRow(args, item, promptById)),
@@ -415,10 +426,17 @@ function buildExtractionWrites(args: {
   return { vocab, grammar, dialogue, corrections, runs };
 }
 
-async function clearExtractionRows(supabase: ServiceClient, lessonId: string): Promise<void> {
+// Wipes the extraction outputs that this lesson alone owns and that the step
+// re-creates from scratch on every attempt. `vocab_items` is intentionally
+// excluded — vocab is household-shared and per-lesson dedupe lives in the
+// upsert path so cards (and any user practice attached to them) survive a
+// retry. The reset hook in `state.ts` mirrors this list.
+async function clearLessonOwnedExtractionRows(
+  supabase: ServiceClient,
+  lessonId: string,
+): Promise<void> {
   const tables = [
     "extraction_runs",
-    "vocab_items",
     "grammar_patterns",
     "dialogue_clips",
     "teacher_corrections",
@@ -432,18 +450,11 @@ async function clearExtractionRows(supabase: ServiceClient, lessonId: string): P
   }
 }
 
-async function persistExtractionRows(
+async function persistLessonOwnedRows(
   supabase: ServiceClient,
-  writes: {
-    vocab: Array<Record<string, unknown>>;
-    grammar: Array<Record<string, unknown>>;
-    dialogue: Array<Record<string, unknown>>;
-    corrections: Array<Record<string, unknown>>;
-    runs: Array<Record<string, unknown>>;
-  },
+  writes: Pick<ExtractionDerivedWrites, "grammar" | "dialogue" | "corrections" | "runs">,
 ): Promise<void> {
   for (const [table, rows] of [
-    ["vocab_items", writes.vocab],
     ["grammar_patterns", writes.grammar],
     ["dialogue_clips", writes.dialogue],
     ["teacher_corrections", writes.corrections],
@@ -457,7 +468,182 @@ async function persistExtractionRows(
   }
 }
 
-function buildVocabRow(
+type ExistingVocabRow = {
+  id: string;
+  lemma: string;
+  reading: string | null;
+};
+
+// Pull the household's existing vocab so we can dedupe against it. Vocab is
+// household-shared, so a word that appeared in an earlier lesson must reuse
+// the same row — both to satisfy the unique index on
+// (household_id, lower(lemma), coalesce(reading, '')) and to keep any cards
+// already attached to that vocab_item stable across lessons.
+async function loadHouseholdVocabIndex(
+  supabase: ServiceClient,
+  householdId: string,
+): Promise<Map<string, ExistingVocabRow>> {
+  const { data, error } = await supabase
+    .from("vocab_items")
+    .select("id, lemma, reading")
+    .eq("household_id", householdId);
+  if (error) {
+    throw new Error(`Could not load vocab_items for household ${householdId}: ${error.message}`);
+  }
+  const index = new Map<string, ExistingVocabRow>();
+  for (const row of (data ?? []) as ExistingVocabRow[]) {
+    index.set(vocabDedupeKey({ lemma: row.lemma, reading: row.reading }), row);
+  }
+  return index;
+}
+
+type ResolvedVocab = PreparedVocab & { vocabItemId: string; isNew: boolean };
+
+// Inserts vocab rows the household has never seen and rewires the prepared
+// entries so each one carries a final `vocabItemId`. Existing rows are
+// reused as-is; we don't rewrite their lemma/reading/example so the original
+// lesson's context survives, even when a later lesson re-extracts the same
+// word.
+async function reconcileVocab(
+  supabase: ServiceClient,
+  householdId: string,
+  prepared: PreparedVocab[],
+): Promise<ResolvedVocab[]> {
+  if (prepared.length === 0) return [];
+
+  const existing = await loadHouseholdVocabIndex(supabase, householdId);
+  const resolved: ResolvedVocab[] = [];
+  const toInsert: PreparedVocab[] = [];
+
+  for (const entry of prepared) {
+    const match = existing.get(entry.key);
+    if (match) {
+      resolved.push({ ...entry, vocabItemId: match.id, isNew: false });
+    } else {
+      toInsert.push(entry);
+    }
+  }
+
+  if (toInsert.length === 0) return resolved;
+
+  const insertRows = toInsert.map((entry) => entry.row) as TablesInsert<"vocab_items">[];
+  const { data, error } = await supabase
+    .from("vocab_items")
+    .insert(insertRows)
+    .select("id, lemma, reading");
+  if (error || !data) {
+    throw new Error(
+      `Could not insert vocab_items for household ${householdId}: ${error?.message ?? "no rows returned"}`,
+    );
+  }
+
+  const insertedIndex = new Map<string, string>();
+  for (const row of data as ExistingVocabRow[]) {
+    insertedIndex.set(vocabDedupeKey({ lemma: row.lemma, reading: row.reading }), row.id);
+  }
+  for (const entry of toInsert) {
+    const id = insertedIndex.get(entry.key);
+    if (!id) {
+      throw new Error(`Inserted vocab_item missing for key ${entry.key}`);
+    }
+    resolved.push({ ...entry, vocabItemId: id, isNew: true });
+  }
+  return resolved;
+}
+
+async function loadHouseholdMemberIds(
+  supabase: ServiceClient,
+  householdId: string,
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id")
+    .eq("household_id", householdId);
+  if (error) {
+    throw new Error(`Could not load profiles for household ${householdId}: ${error.message}`);
+  }
+  return (data ?? []).map((row) => (row as { id: string }).id);
+}
+
+// Build the lookup that lets us skip a vocab_item for any user who has marked
+// it known — either via the future "I already know this" UI or via seed
+// fixtures that pre-populate user_known_words. The `(user_id, vocab_item_id)`
+// pair is the dedupe key.
+async function loadKnownWordPairs(
+  supabase: ServiceClient,
+  userIds: string[],
+  vocabItemIds: string[],
+): Promise<Set<string>> {
+  if (userIds.length === 0 || vocabItemIds.length === 0) return new Set();
+
+  const { data, error } = await supabase
+    .from("user_known_words")
+    .select("user_id, vocab_item_id")
+    .in("user_id", userIds)
+    .in("vocab_item_id", vocabItemIds);
+  if (error) {
+    throw new Error(`Could not load user_known_words: ${error.message}`);
+  }
+  const pairs = new Set<string>();
+  for (const row of (data ?? []) as Array<{ user_id: string; vocab_item_id: string }>) {
+    pairs.add(`${row.user_id}|${row.vocab_item_id}`);
+  }
+  return pairs;
+}
+
+function buildCardRows(args: {
+  lesson: LessonForExtraction;
+  resolvedVocab: ResolvedVocab[];
+  userIds: string[];
+  knownPairs: Set<string>;
+  model: string;
+  promptVersion: string;
+}): TablesInsert<"cards">[] {
+  const rows: TablesInsert<"cards">[] = [];
+  for (const userId of args.userIds) {
+    for (const entry of args.resolvedVocab) {
+      if (args.knownPairs.has(`${userId}|${entry.vocabItemId}`)) continue;
+      rows.push({
+        user_id: userId,
+        vocab_item_id: entry.vocabItemId,
+        // Carry the lesson context the user first encountered the word in so
+        // the review UI can show "from {lesson}" alongside the vocab card.
+        // Idempotent inserts (`ignoreDuplicates`) preserve the original
+        // metadata across retries, even if a later run reuses a different
+        // example sentence.
+        metadata: {
+          source_lesson_id: args.lesson.id,
+          source_transcript_id: args.lesson.id,
+          source_segment_ids: entry.segmentIds,
+          example_sentence: entry.source.example ?? null,
+          example_translation: entry.source.exampleGloss ?? null,
+          model: args.model,
+          prompt_version: args.promptVersion,
+        },
+      });
+    }
+  }
+  return rows;
+}
+
+async function persistCards(
+  supabase: ServiceClient,
+  rows: TablesInsert<"cards">[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  // unique (user_id, vocab_item_id) — `ignoreDuplicates` keeps the existing
+  // card row and its FSRS state intact when an extraction retry re-emits the
+  // same vocab.
+  const { error } = await supabase
+    .from("cards")
+    .upsert(rows, { onConflict: "user_id,vocab_item_id", ignoreDuplicates: true });
+  if (error) {
+    throw new Error(`Could not upsert cards: ${error.message}`);
+  }
+  return rows.length;
+}
+
+function buildPreparedVocab(
   args: {
     lesson: LessonForExtraction;
     model: string;
@@ -465,27 +651,35 @@ function buildVocabRow(
   },
   item: ExtractionOutput["new_vocab"][number],
   promptById: Map<string, SegmentForExtraction>,
-): Record<string, unknown> {
+): PreparedVocab {
   const sourceSegments = resolveSourceSegments(item.sourceSegmentIds, promptById, `vocab item "${item.term}"`);
+  const lemma = normalizeLemma(item.term);
+  const reading = normalizeReading(item.pronunciation);
+  const segmentIds = sourceSegments.map((segment) => segment.id);
   return {
-    household_id: args.lesson.household_id,
-    lesson_id: args.lesson.id,
-    lemma: item.term,
-    reading: item.pronunciation ?? null,
-    translation: item.gloss,
-    part_of_speech: item.partOfSpeech ?? null,
-    example_sentence: item.example ?? null,
-    example_translation: item.exampleGloss ?? null,
-    audio_storage_bucket: null,
-    audio_storage_path: null,
-    difficulty: difficultyScore(item.difficulty),
-    metadata: extractionMetadata({
-      model: args.model,
-      promptVersion: args.promptVersion,
-      sourceTranscriptId: args.lesson.id,
-      sourceSegmentIds: sourceSegments.map((segment) => segment.id),
-      kind: "vocab",
-    }),
+    key: vocabDedupeKey({ lemma, reading }),
+    source: item,
+    segmentIds,
+    row: {
+      household_id: args.lesson.household_id,
+      lesson_id: args.lesson.id,
+      lemma,
+      reading,
+      translation: item.gloss,
+      part_of_speech: item.partOfSpeech ?? null,
+      example_sentence: item.example ?? null,
+      example_translation: item.exampleGloss ?? null,
+      audio_storage_bucket: null,
+      audio_storage_path: null,
+      difficulty: difficultyScore(item.difficulty),
+      metadata: extractionMetadata({
+        model: args.model,
+        promptVersion: args.promptVersion,
+        sourceTranscriptId: args.lesson.id,
+        sourceSegmentIds: segmentIds,
+        kind: "vocab",
+      }),
+    },
   };
 }
 
@@ -807,7 +1001,6 @@ export async function persistDiarizationLabels(
 
 async function extractingStep(ctx: StepContext): Promise<StepResult> {
   const { supabase, services, logger, job } = ctx;
-  const lesson = await loadLessonForExtraction(supabase, job.lesson_id);
   const segments = await loadSegmentsForExtraction(supabase, job.lesson_id);
 
   if (segments.length === 0) {
@@ -821,6 +1014,8 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
         model: null,
         segment_count: 0,
         vocab_count: 0,
+        new_vocab_count: 0,
+        card_count: 0,
         grammar_count: 0,
         dialogue_count: 0,
         correction_count: 0,
@@ -828,6 +1023,7 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
     };
   }
 
+  const lesson = await loadLessonForExtraction(supabase, job.lesson_id);
   const promptSegments = buildExtractionPromptSegments(segments);
   const language = lesson.source_language ?? pickInputLanguage(segments);
 
@@ -853,12 +1049,37 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
     extractedAt,
   });
 
-  await clearExtractionRows(supabase, job.lesson_id);
-  await persistExtractionRows(supabase, writes);
+  // Lesson-owned outputs (grammar/dialogue/corrections + the run audit trail)
+  // are wiped and rewritten — they have no per-user state to preserve. Vocab
+  // is reconciled separately so a household-shared word that was added by an
+  // earlier lesson keeps its existing row (and any cards / FSRS history).
+  await clearLessonOwnedExtractionRows(supabase, job.lesson_id);
+  await persistLessonOwnedRows(supabase, writes);
+
+  const resolvedVocab = await reconcileVocab(supabase, lesson.household_id, writes.vocab);
+  const newVocabCount = resolvedVocab.filter((entry) => entry.isNew).length;
+
+  const userIds = await loadHouseholdMemberIds(supabase, lesson.household_id);
+  const knownPairs = await loadKnownWordPairs(
+    supabase,
+    userIds,
+    resolvedVocab.map((entry) => entry.vocabItemId),
+  );
+  const cardRows = buildCardRows({
+    lesson,
+    resolvedVocab,
+    userIds,
+    knownPairs,
+    model,
+    promptVersion,
+  });
+  const cardCount = await persistCards(supabase, cardRows);
 
   logger.info("Persisted lesson extraction", {
     lessonId: job.lesson_id,
     vocabCount: writes.vocab.length,
+    newVocabCount,
+    cardCount,
     grammarCount: writes.grammar.length,
     dialogueCount: writes.dialogue.length,
     correctionCount: writes.corrections.length,
@@ -873,6 +1094,8 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
       schema_version: extraction.schemaVersion,
       segment_count: segments.length,
       vocab_count: writes.vocab.length,
+      new_vocab_count: newVocabCount,
+      card_count: cardCount,
       grammar_count: writes.grammar.length,
       dialogue_count: writes.dialogue.length,
       correction_count: writes.corrections.length,

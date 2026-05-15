@@ -1,4 +1,5 @@
 export * from "./versions.js";
+export * from "./vocab.js";
 export * from "./schemas/card.js";
 export * from "./schemas/deck.js";
 export * from "./schemas/review.js";
