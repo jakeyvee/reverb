@@ -301,9 +301,28 @@ const STAGE_RESET_HOOKS: Record<WorkerStage, StageResetHook> = {
     }
   },
   extracting: async (supabase, lessonId) => {
-    const { error } = await supabase.from("extraction_runs").delete().eq("lesson_id", lessonId);
-    if (error) {
-      throw new Error(`Could not reset extraction_runs for lesson ${lessonId}: ${error.message}`);
+    // Wipe every derived row the extraction step writes for this lesson so a
+    // retry replaces the previous attempt rather than appending duplicates.
+    // Order matters: grammar_exercises FK-cascades from grammar_patterns, and
+    // cards/user_known_words cascade from vocab_items, so deleting the parents
+    // is enough — but we still scope by lesson_id rather than truncating.
+    //
+    // Safety: this only runs when the orchestrator is resuming a `failed`
+    // job (see `runLessonPipeline`). A successful re-entry short-circuits
+    // before reaching this hook, so a user who has already started
+    // practicing cannot have their cards wiped by a re-run.
+    const tables = [
+      "extraction_runs",
+      "vocab_items",
+      "grammar_patterns",
+      "dialogue_clips",
+      "teacher_corrections",
+    ] as const;
+    for (const table of tables) {
+      const { error } = await supabase.from(table).delete().eq("lesson_id", lessonId);
+      if (error) {
+        throw new Error(`Could not reset ${table} for lesson ${lessonId}: ${error.message}`);
+      }
     }
   },
   generating_audio: async () => {

@@ -15,6 +15,10 @@ type ProfileRow = Tables<"profiles">;
 type NotificationRow = Tables<"notification_events">;
 type SegmentRow = Tables<"transcript_segments">;
 type WordRow = Tables<"transcript_words">;
+type VocabRow = Tables<"vocab_items">;
+type GrammarPatternRow = Tables<"grammar_patterns">;
+type DialogueClipRow = Tables<"dialogue_clips">;
+type TeacherCorrectionRow = Tables<"teacher_corrections">;
 type ExtractionRunRow = Tables<"extraction_runs">;
 
 type Filter = { col: string; value: unknown };
@@ -27,6 +31,10 @@ type TableName =
   | "notification_events"
   | "transcript_segments"
   | "transcript_words"
+  | "vocab_items"
+  | "grammar_patterns"
+  | "dialogue_clips"
+  | "teacher_corrections"
   | "extraction_runs";
 
 export class FakeSupabase {
@@ -37,6 +45,10 @@ export class FakeSupabase {
   notifications: NotificationRow[] = [];
   transcriptSegments: SegmentRow[] = [];
   transcriptWords: WordRow[] = [];
+  vocabItems: VocabRow[] = [];
+  grammarPatterns: GrammarPatternRow[] = [];
+  dialogueClips: DialogueClipRow[] = [];
+  teacherCorrections: TeacherCorrectionRow[] = [];
   extractionRuns: ExtractionRunRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
@@ -60,6 +72,14 @@ export class FakeSupabase {
         return new RowsQuery(this, table, this.transcriptSegments);
       case "transcript_words":
         return new RowsQuery(this, table, this.transcriptWords);
+      case "vocab_items":
+        return new RowsQuery(this, table, this.vocabItems);
+      case "grammar_patterns":
+        return new RowsQuery(this, table, this.grammarPatterns);
+      case "dialogue_clips":
+        return new RowsQuery(this, table, this.dialogueClips);
+      case "teacher_corrections":
+        return new RowsQuery(this, table, this.teacherCorrections);
       case "extraction_runs":
         return new RowsQuery(this, table, this.extractionRuns);
       default:
@@ -111,6 +131,56 @@ export class FakeSupabase {
       return {
         id: row.id ?? randomUUID(),
         confidence: null,
+        created_at: now,
+        ...row,
+      };
+    }
+    if (table === "vocab_items") {
+      return {
+        id: row.id ?? randomUUID(),
+        reading: null,
+        translation: null,
+        part_of_speech: null,
+        example_sentence: null,
+        example_translation: null,
+        audio_storage_bucket: null,
+        audio_storage_path: null,
+        difficulty: null,
+        metadata: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
+    if (table === "grammar_patterns") {
+      return {
+        id: row.id ?? randomUUID(),
+        description: null,
+        examples: [],
+        difficulty: null,
+        metadata: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
+    if (table === "dialogue_clips") {
+      return {
+        id: row.id ?? randomUUID(),
+        segment_id: null,
+        caption: null,
+        translation: null,
+        metadata: {},
+        created_at: now,
+        ...row,
+      };
+    }
+    if (table === "teacher_corrections") {
+      return {
+        id: row.id ?? randomUUID(),
+        segment_id: null,
+        explanation: null,
+        metadata: {},
         created_at: now,
         ...row,
       };

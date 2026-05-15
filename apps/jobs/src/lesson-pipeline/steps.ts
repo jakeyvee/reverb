@@ -1,10 +1,12 @@
-import { DIARIZATION_PROMPT_VERSION } from "@reverb/ai";
+import { DIARIZATION_PROMPT_VERSION, EXTRACTION_RUN_KINDS } from "@reverb/ai";
 import type {
   DiarizationOutput,
   DiarizationSegmentLabel,
+  ExtractionOutput,
   SpeakerLabel,
   Transcript,
 } from "@reverb/domain";
+import { LESSON_CLIPS_BUCKET, dialogueClipPath } from "@reverb/media";
 import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
 import type { PipelineLogger } from "./logger.js";
@@ -269,6 +271,17 @@ type SegmentForDiarization = {
   language: string | null;
 };
 
+type SegmentForExtraction = SegmentForDiarization & {
+  speaker: string | null;
+  speaker_low_priority: boolean | null;
+};
+
+type LessonForExtraction = {
+  id: string;
+  household_id: string;
+  source_language: string | null;
+};
+
 async function loadSegmentsForDiarization(
   supabase: ServiceClient,
   lessonId: string,
@@ -292,6 +305,428 @@ function pickInputLanguage(segments: SegmentForDiarization[]): string {
     if (seg.language) return seg.language;
   }
   return DEFAULT_LANGUAGE;
+}
+
+async function loadLessonForExtraction(
+  supabase: ServiceClient,
+  lessonId: string,
+): Promise<LessonForExtraction> {
+  const { data, error } = await supabase
+    .from("lessons")
+    .select("id, household_id, source_language")
+    .eq("id", lessonId)
+    .maybeSingle();
+  if (error || !data) {
+    throw new Error(
+      `Could not load lesson ${lessonId} for extraction: ${error?.message ?? "not found"}`,
+    );
+  }
+  return data as LessonForExtraction;
+}
+
+async function loadSegmentsForExtraction(
+  supabase: ServiceClient,
+  lessonId: string,
+): Promise<SegmentForExtraction[]> {
+  const { data, error } = await supabase
+    .from("transcript_segments")
+    .select("id, segment_index, text, start_ms, end_ms, language, speaker, speaker_low_priority")
+    .eq("lesson_id", lessonId)
+    .order("segment_index", { ascending: true });
+  if (error) {
+    throw new Error(`Could not load transcript_segments for extraction: ${error.message}`);
+  }
+  return (data ?? []) as SegmentForExtraction[];
+}
+
+function buildExtractionPromptSegments(segments: SegmentForExtraction[]): Array<{
+  id: string;
+  text: string;
+  startSec: number;
+  endSec: number;
+  language?: string;
+  speaker: SpeakerLabel;
+  lowPriority: boolean;
+}> {
+  return segments.map((seg) => ({
+    id: promptSegmentId(seg),
+    text: seg.text,
+    startSec: seg.start_ms / 1000,
+    endSec: seg.end_ms / 1000,
+    ...(seg.language ? { language: seg.language } : {}),
+    speaker: normalizeSpeaker(seg.speaker),
+    lowPriority: Boolean(seg.speaker_low_priority),
+  }));
+}
+
+function buildExtractionWrites(args: {
+  lesson: LessonForExtraction;
+  segments: SegmentForExtraction[];
+  extraction: ExtractionOutput;
+  model: string;
+  promptVersion: string;
+  extractedAt: string;
+}): {
+  vocab: Array<Record<string, unknown>>;
+  grammar: Array<Record<string, unknown>>;
+  dialogue: Array<Record<string, unknown>>;
+  corrections: Array<Record<string, unknown>>;
+  runs: Array<Record<string, unknown>>;
+} {
+  const promptById = new Map(args.segments.map((segment) => [promptSegmentId(segment), segment]));
+  const vocab = uniqueBy(
+    args.extraction.new_vocab.map((item) => buildVocabRow(args, item, promptById)),
+    (row) => `${String(row.lemma).toLowerCase()}|${String(row.reading ?? "")}`,
+  );
+  const grammar = uniqueBy(
+    args.extraction.grammar_patterns.map((item) => buildGrammarRow(args, item, promptById)),
+    (row) => `${String(row.pattern).toLowerCase()}|${JSON.stringify(row.examples)}`,
+  );
+  const dialogue = uniqueBy(
+    args.extraction.dialogue_clips.map((item) => buildDialogueRow(args, item, promptById)),
+    (row) => String(row.id),
+  );
+  const corrections = uniqueBy(
+    args.extraction.teacher_corrections.map((item) => buildCorrectionRow(args, item, promptById)),
+    (row) => `${String(row.segment_id)}|${String(row.kind)}|${String(row.source_text)}|${String(row.corrected_text)}`,
+  );
+
+  const input = {
+    sourceTranscriptId: args.extraction.sourceTranscriptId,
+    language: args.extraction.language,
+    segmentCount: args.segments.length,
+    segmentIds: args.segments.map((segment) => segment.id),
+  };
+
+  const runs = EXTRACTION_RUN_KINDS.map((kind) => ({
+    lesson_id: args.lesson.id,
+    kind,
+    status: "succeeded",
+    model: args.model,
+    prompt_version: args.promptVersion,
+    input,
+    output: extractionOutputForKind(args.extraction, kind),
+    error: null,
+    cost_cents: null,
+    started_at: args.extractedAt,
+    finished_at: args.extractedAt,
+  }));
+
+  return { vocab, grammar, dialogue, corrections, runs };
+}
+
+async function clearExtractionRows(supabase: ServiceClient, lessonId: string): Promise<void> {
+  const tables = [
+    "extraction_runs",
+    "vocab_items",
+    "grammar_patterns",
+    "dialogue_clips",
+    "teacher_corrections",
+  ] as const;
+
+  for (const table of tables) {
+    const { error } = await supabase.from(table).delete().eq("lesson_id", lessonId);
+    if (error) {
+      throw new Error(`Could not clear ${table} for lesson ${lessonId}: ${error.message}`);
+    }
+  }
+}
+
+async function persistExtractionRows(
+  supabase: ServiceClient,
+  writes: {
+    vocab: Array<Record<string, unknown>>;
+    grammar: Array<Record<string, unknown>>;
+    dialogue: Array<Record<string, unknown>>;
+    corrections: Array<Record<string, unknown>>;
+    runs: Array<Record<string, unknown>>;
+  },
+): Promise<void> {
+  for (const [table, rows] of [
+    ["vocab_items", writes.vocab],
+    ["grammar_patterns", writes.grammar],
+    ["dialogue_clips", writes.dialogue],
+    ["teacher_corrections", writes.corrections],
+    ["extraction_runs", writes.runs],
+  ] as const) {
+    if (rows.length === 0) continue;
+    const { error } = await supabase.from(table).insert(rows);
+    if (error) {
+      throw new Error(`Could not persist ${table}: ${error.message}`);
+    }
+  }
+}
+
+function buildVocabRow(
+  args: {
+    lesson: LessonForExtraction;
+    model: string;
+    promptVersion: string;
+  },
+  item: ExtractionOutput["new_vocab"][number],
+  promptById: Map<string, SegmentForExtraction>,
+): Record<string, unknown> {
+  const sourceSegments = resolveSourceSegments(item.sourceSegmentIds, promptById, `vocab item "${item.term}"`);
+  return {
+    household_id: args.lesson.household_id,
+    lesson_id: args.lesson.id,
+    lemma: item.term,
+    reading: item.pronunciation ?? null,
+    translation: item.gloss,
+    part_of_speech: item.partOfSpeech ?? null,
+    example_sentence: item.example ?? null,
+    example_translation: item.exampleGloss ?? null,
+    audio_storage_bucket: null,
+    audio_storage_path: null,
+    difficulty: difficultyScore(item.difficulty),
+    metadata: extractionMetadata({
+      model: args.model,
+      promptVersion: args.promptVersion,
+      sourceTranscriptId: args.lesson.id,
+      sourceSegmentIds: sourceSegments.map((segment) => segment.id),
+      kind: "vocab",
+    }),
+  };
+}
+
+function buildGrammarRow(
+  args: {
+    lesson: LessonForExtraction;
+    model: string;
+    promptVersion: string;
+  },
+  item: ExtractionOutput["grammar_patterns"][number],
+  promptById: Map<string, SegmentForExtraction>,
+): Record<string, unknown> {
+  const sourceSegments = resolveSourceSegments(
+    item.sourceSegmentIds,
+    promptById,
+    `grammar pattern "${item.pattern}"`,
+  );
+  return {
+    household_id: args.lesson.household_id,
+    lesson_id: args.lesson.id,
+    pattern: item.pattern,
+    description: item.explanation,
+    examples: item.examples,
+    difficulty: difficultyScore(item.difficulty),
+    metadata: extractionMetadata({
+      model: args.model,
+      promptVersion: args.promptVersion,
+      sourceTranscriptId: args.lesson.id,
+      sourceSegmentIds: sourceSegments.map((segment) => segment.id),
+      kind: "grammar",
+    }),
+  };
+}
+
+function buildDialogueRow(
+  args: {
+    lesson: LessonForExtraction;
+    model: string;
+    promptVersion: string;
+  },
+  item: ExtractionOutput["dialogue_clips"][number],
+  promptById: Map<string, SegmentForExtraction>,
+): Record<string, unknown> {
+  const start = resolvePromptSegment(item.startSegmentId, promptById, `dialogue clip "${item.id}" startSegmentId`);
+  const end = resolvePromptSegment(item.endSegmentId, promptById, `dialogue clip "${item.id}" endSegmentId`);
+  if (start.segment_index > end.segment_index) {
+    throw new Error(
+      `Dialogue clip "${item.id}" has startSegmentId ${item.startSegmentId} after endSegmentId ${item.endSegmentId}`,
+    );
+  }
+  if (Math.abs(item.startSec - start.start_ms / 1000) > 0.01 || Math.abs(item.endSec - end.end_ms / 1000) > 0.01) {
+    throw new Error(
+      `Dialogue clip "${item.id}" does not mirror the transcript time range for ${item.startSegmentId}..${item.endSegmentId}`,
+    );
+  }
+
+  return {
+    id: item.id,
+    household_id: args.lesson.household_id,
+    lesson_id: args.lesson.id,
+    segment_id: start.id,
+    start_ms: start.start_ms,
+    end_ms: end.end_ms,
+    storage_bucket: LESSON_CLIPS_BUCKET,
+    storage_path: dialogueClipPath({
+      householdId: args.lesson.household_id,
+      lessonId: args.lesson.id,
+      clipId: item.id,
+    }),
+    caption: item.title,
+    translation: item.description ?? null,
+    metadata: extractionMetadata({
+      model: args.model,
+      promptVersion: args.promptVersion,
+      sourceTranscriptId: args.lesson.id,
+      sourceSegmentIds: sourceSegmentIdsInRange(promptById, start.segment_index, end.segment_index),
+      kind: "dialogue",
+      extra: {
+        startSegmentId: item.startSegmentId,
+        endSegmentId: item.endSegmentId,
+        participants: item.participants,
+        focus: item.focus ?? null,
+      },
+    }),
+  };
+}
+
+function buildCorrectionRow(
+  args: {
+    lesson: LessonForExtraction;
+    model: string;
+    promptVersion: string;
+  },
+  item: ExtractionOutput["teacher_corrections"][number],
+  promptById: Map<string, SegmentForExtraction>,
+): Record<string, unknown> {
+  const segment = resolvePromptSegment(item.segmentId, promptById, `teacher correction for "${item.utterance}"`);
+  return {
+    household_id: args.lesson.household_id,
+    lesson_id: args.lesson.id,
+    segment_id: segment.id,
+    kind: teacherCorrectionKind(item.category),
+    source_text: item.utterance,
+    corrected_text: item.correction,
+    explanation: item.rationale ?? null,
+    metadata: extractionMetadata({
+      model: args.model,
+      promptVersion: args.promptVersion,
+      sourceTranscriptId: args.lesson.id,
+      sourceSegmentIds: [segment.id],
+      kind: "corrections",
+      extra: {
+        studentSpeaker: item.studentSpeaker,
+        category: item.category,
+        severity: item.severity ?? null,
+      },
+    }),
+  };
+}
+
+function extractionOutputForKind(
+  extraction: ExtractionOutput,
+  kind: (typeof EXTRACTION_RUN_KINDS)[number],
+): Record<string, unknown> {
+  switch (kind) {
+    case "vocab":
+      return { new_vocab: extraction.new_vocab };
+    case "grammar":
+      return { grammar_patterns: extraction.grammar_patterns };
+    case "dialogue":
+      return { dialogue_clips: extraction.dialogue_clips };
+    case "corrections":
+      return { teacher_corrections: extraction.teacher_corrections };
+  }
+}
+
+function resolveSourceSegments(
+  sourceSegmentIds: string[],
+  promptById: Map<string, SegmentForExtraction>,
+  label: string,
+): SegmentForExtraction[] {
+  if (sourceSegmentIds.length === 0) {
+    throw new Error(`${label} must reference at least one transcript segment`);
+  }
+
+  return sourceSegmentIds.map((sourceSegmentId) =>
+    resolvePromptSegment(sourceSegmentId, promptById, `${label} sourceSegmentIds`),
+  );
+}
+
+function resolvePromptSegment(
+  promptId: string,
+  promptById: Map<string, SegmentForExtraction>,
+  label: string,
+): SegmentForExtraction {
+  const segment = promptById.get(promptId);
+  if (!segment) {
+    throw new Error(`${label} references unknown transcript segment ${promptId}`);
+  }
+  return segment;
+}
+
+function sourceSegmentIdsInRange(
+  promptById: Map<string, SegmentForExtraction>,
+  startIndex: number,
+  endIndex: number,
+): string[] {
+  const ids: string[] = [];
+  for (const segment of promptById.values()) {
+    if (segment.segment_index < startIndex || segment.segment_index > endIndex) continue;
+    ids.push(segment.id);
+  }
+  return ids;
+}
+
+function extractionMetadata(args: {
+  model: string;
+  promptVersion: string;
+  sourceTranscriptId: string;
+  sourceSegmentIds: string[];
+  kind: "vocab" | "grammar" | "dialogue" | "corrections";
+  extra?: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    model: args.model,
+    prompt_version: args.promptVersion,
+    source_transcript_id: args.sourceTranscriptId,
+    source_segment_ids: args.sourceSegmentIds,
+    kind: args.kind,
+    ...(args.extra ?? {}),
+  };
+}
+
+function promptSegmentId(segment: SegmentForExtraction): string {
+  return `S${segment.segment_index}`;
+}
+
+function normalizeSpeaker(speaker: string | null): SpeakerLabel {
+  if (speaker === "teacher" || speaker === "student_vincent" || speaker === "student_gf") {
+    return speaker;
+  }
+  return "unknown";
+}
+
+function difficultyScore(difficulty: ExtractionOutput["new_vocab"][number]["difficulty"]): number | null {
+  if (!difficulty) return null;
+  switch (difficulty) {
+    case "beginner":
+      return 1;
+    case "intermediate":
+      return 2;
+    case "advanced":
+      return 3;
+  }
+}
+
+function teacherCorrectionKind(
+  category: ExtractionOutput["teacher_corrections"][number]["category"],
+): "grammar" | "vocabulary" | "pronunciation" | "usage" {
+  switch (category) {
+    case "vocab":
+      return "vocabulary";
+    case "grammar":
+    case "pronunciation":
+    case "usage":
+      return category;
+    case "other":
+      return "usage";
+  }
+}
+
+function uniqueBy<T>(values: T[], keyFn: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const value of values) {
+    const key = keyFn(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
 }
 
 // Match each LLM-emitted label back to its database row. Labels for prompt
@@ -370,12 +805,79 @@ export async function persistDiarizationLabels(
   };
 }
 
-async function extractingStep({ logger }: StepContext): Promise<StepResult> {
-  // Placeholder for vocab/grammar/dialogue extraction. The real step will
-  // insert one extraction_runs row per kind and upsert cards keyed on
-  // (lesson_id, deterministic content hash) to keep retries safe.
-  logger.info("Extraction placeholder — would call the LLM and write extraction_runs");
-  return { details: { placeholder: true } };
+async function extractingStep(ctx: StepContext): Promise<StepResult> {
+  const { supabase, services, logger, job } = ctx;
+  const lesson = await loadLessonForExtraction(supabase, job.lesson_id);
+  const segments = await loadSegmentsForExtraction(supabase, job.lesson_id);
+
+  if (segments.length === 0) {
+    logger.info("Extraction skipped — no transcript segments to extract from", {
+      lessonId: job.lesson_id,
+    });
+    return {
+      details: {
+        provider: "noop",
+        prompt_version: null,
+        model: null,
+        segment_count: 0,
+        vocab_count: 0,
+        grammar_count: 0,
+        dialogue_count: 0,
+        correction_count: 0,
+      },
+    };
+  }
+
+  const promptSegments = buildExtractionPromptSegments(segments);
+  const language = lesson.source_language ?? pickInputLanguage(segments);
+
+  logger.info("Calling Anthropic extraction", {
+    lessonId: job.lesson_id,
+    segmentCount: promptSegments.length,
+    language,
+  });
+
+  const { extraction, model, promptVersion } = await services.extract({
+    sourceTranscriptId: job.lesson_id,
+    language,
+    segments: promptSegments,
+  });
+
+  const extractedAt = new Date().toISOString();
+  const writes = buildExtractionWrites({
+    lesson,
+    segments,
+    extraction,
+    model,
+    promptVersion,
+    extractedAt,
+  });
+
+  await clearExtractionRows(supabase, job.lesson_id);
+  await persistExtractionRows(supabase, writes);
+
+  logger.info("Persisted lesson extraction", {
+    lessonId: job.lesson_id,
+    vocabCount: writes.vocab.length,
+    grammarCount: writes.grammar.length,
+    dialogueCount: writes.dialogue.length,
+    correctionCount: writes.corrections.length,
+    runCount: EXTRACTION_RUN_KINDS.length,
+  });
+
+  return {
+    details: {
+      provider: "anthropic-extraction",
+      model,
+      prompt_version: promptVersion,
+      schema_version: extraction.schemaVersion,
+      segment_count: segments.length,
+      vocab_count: writes.vocab.length,
+      grammar_count: writes.grammar.length,
+      dialogue_count: writes.dialogue.length,
+      correction_count: writes.corrections.length,
+    },
+  };
 }
 
 async function generatingAudioStep({ logger }: StepContext): Promise<StepResult> {
