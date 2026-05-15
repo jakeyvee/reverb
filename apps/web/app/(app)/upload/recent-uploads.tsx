@@ -34,7 +34,7 @@ export async function RecentUploads() {
   return (
     <section>
       <SectionHeader title="Recent uploads" />
-      <LessonStatusList rows={rows} />
+      <LessonStatusList rows={rows} canRetry />
     </section>
   );
 }

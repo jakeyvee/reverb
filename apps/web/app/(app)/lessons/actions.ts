@@ -3,8 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createServiceRoleClient } from "@reverb/db/server";
+import type { Json } from "@reverb/db/types";
 import { getUser } from "@/lib/auth/get-user";
 import { getProfile } from "@/lib/auth/get-profile";
+import { enqueueLessonProcessing } from "@/lib/jobs/enqueue-lesson-processing";
 
 const RetryInputSchema = z.object({
   lessonId: z.string().uuid(),
@@ -13,11 +15,22 @@ const RetryInputSchema = z.object({
 export type RetryLessonProcessingInput = z.infer<typeof RetryInputSchema>;
 export type RetryLessonProcessingResult = { ok: true } | { ok: false; error: string };
 
-// Placeholder retry: resets the failed lesson_jobs row back to `queued`,
-// bumps `attempt_count`, and clears the error summary. The worker that
-// actually picks the row back up is added in a later ticket; for now this
-// keeps the UI affordance from looking dead and matches VOL-108's "placeholder
-// retry affordance" requirement.
+type JobMetadata = {
+  stages?: Record<string, { completed_at?: string }>;
+  last_failure?: { stage?: string | null; message?: string };
+  [key: string]: unknown;
+};
+
+// Reuse the original uploaded audio and resume the pipeline. The server
+// action:
+//   1. Confirms the caller owns the lesson (Vincent-only — only the upload
+//      account can drive retries today).
+//   2. Clears the completion marker for the stage that failed so the worker
+//      actually re-runs it, instead of short-circuiting on stale metadata.
+//   3. Drops any extraction_runs rows the previous attempt left behind —
+//      stages that upsert on natural keys are safe to leave alone.
+//   4. Flips the row back to `queued` and re-enqueues Trigger.dev using the
+//      lesson's stable idempotency key, so duplicate dispatches coalesce.
 export async function retryLessonProcessing(
   input: RetryLessonProcessingInput,
 ): Promise<RetryLessonProcessingResult> {
@@ -29,6 +42,9 @@ export async function retryLessonProcessing(
   const user = await getUser();
   if (!user || !user.isAllowed) {
     return { ok: false, error: "Sign in to retry processing." };
+  }
+  if (!user.isVincent) {
+    return { ok: false, error: "Only the upload account can retry processing." };
   }
 
   const profile = await getProfile(user.id);
@@ -54,7 +70,7 @@ export async function retryLessonProcessing(
 
   const { data: job, error: jobError } = await supabase
     .from("lesson_jobs")
-    .select("status, attempt_count")
+    .select("status, attempt_count, provider_metadata")
     .eq("lesson_id", parsed.data.lessonId)
     .maybeSingle();
   if (jobError) {
@@ -67,15 +83,42 @@ export async function retryLessonProcessing(
     return { ok: false, error: "Only failed lessons can be retried." };
   }
 
+  const metadata: JobMetadata =
+    job.provider_metadata &&
+    typeof job.provider_metadata === "object" &&
+    !Array.isArray(job.provider_metadata)
+      ? (job.provider_metadata as JobMetadata)
+      : {};
+  const failedStage =
+    typeof metadata.last_failure?.stage === "string" ? metadata.last_failure.stage : null;
+
+  // Reset derived rows for the failed phase. extracting is the only stage
+  // that inserts rows without a natural key today; the others upsert on a
+  // deterministic key and stay idempotent on replay.
+  if (failedStage === "extracting") {
+    const { error: deleteError } = await supabase
+      .from("extraction_runs")
+      .delete()
+      .eq("lesson_id", parsed.data.lessonId);
+    if (deleteError) {
+      return { ok: false, error: "Could not reset extraction state." };
+    }
+  }
+
+  // Clear the failed stage's completion marker — the worker uses it to skip
+  // already-done stages, and we want this specific stage to actually re-run.
+  const stages = metadata.stages ? { ...metadata.stages } : {};
+  if (failedStage) delete stages[failedStage];
+  const nextMetadata: JobMetadata = { ...metadata, stages };
+
   const { error: updateError } = await supabase
     .from("lesson_jobs")
     .update({
       status: "queued",
       error_summary: null,
       failed_at: null,
-      started_at: null,
       finished_at: null,
-      attempt_count: job.attempt_count + 1,
+      provider_metadata: nextMetadata as unknown as Json,
     })
     .eq("lesson_id", parsed.data.lessonId);
   if (updateError) {
@@ -84,9 +127,84 @@ export async function retryLessonProcessing(
 
   await supabase.from("lessons").update({ status: "processing" }).eq("id", parsed.data.lessonId);
 
+  // Dispatch the worker. Same idempotency key as the original upload, so
+  // double-clicking retry coalesces to a single Trigger.dev run.
+  const enqueue = await enqueueLessonProcessing(parsed.data.lessonId);
+  if (enqueue.ok && !enqueue.skipped && enqueue.runId) {
+    const { error: tagError } = await supabase
+      .from("lesson_jobs")
+      .update({ trigger_run_id: enqueue.runId })
+      .eq("lesson_id", parsed.data.lessonId);
+    if (tagError) {
+      console.error("[retry] could not record trigger_run_id", tagError);
+    }
+  } else if (!enqueue.ok) {
+    // Re-park the row as failed with the enqueue error so the user sees the
+    // failure surface immediately. Without this the row sits in `queued`
+    // with no worker polling.
+    const summary = `Could not enqueue retry: ${enqueue.error}`;
+    await supabase
+      .from("lesson_jobs")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_summary: summary,
+      })
+      .eq("lesson_id", parsed.data.lessonId);
+    return { ok: false, error: summary };
+  }
+
   revalidatePath("/");
   revalidatePath("/lessons");
   revalidatePath("/upload");
+  revalidatePath("/notifications");
 
   return { ok: true };
+}
+
+const MarkNotificationsReadInputSchema = z.object({
+  ids: z.array(z.string().uuid()).max(100).optional(),
+});
+
+export type MarkNotificationsReadInput = z.infer<typeof MarkNotificationsReadInputSchema>;
+export type MarkNotificationsReadResult =
+  | { ok: true; updated: number }
+  | { ok: false; error: string };
+
+// Mark a user's in-app notifications as read. With no `ids`, marks every
+// unread notification for the current user — the "Mark all read" affordance.
+export async function markNotificationsRead(
+  input: MarkNotificationsReadInput = {},
+): Promise<MarkNotificationsReadResult> {
+  const parsed = MarkNotificationsReadInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid request." };
+  }
+
+  const user = await getUser();
+  if (!user || !user.isAllowed) {
+    return { ok: false, error: "Sign in to manage notifications." };
+  }
+
+  const supabase = createServiceRoleClient();
+  const ids = parsed.data.ids;
+  const readAt = new Date().toISOString();
+
+  let query = supabase
+    .from("notification_events")
+    .update({ read_at: readAt })
+    .eq("user_id", user.id)
+    .is("read_at", null);
+  if (ids && ids.length > 0) query = query.in("id", ids);
+
+  const { data, error } = await query.select("id");
+  if (error) {
+    return { ok: false, error: "Could not update notifications." };
+  }
+
+  revalidatePath("/");
+  revalidatePath("/lessons");
+  revalidatePath("/notifications");
+
+  return { ok: true, updated: data?.length ?? 0 };
 }

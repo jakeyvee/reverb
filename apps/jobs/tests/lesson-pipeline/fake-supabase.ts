@@ -10,37 +10,61 @@ import type { Tables } from "@reverb/db/types";
 
 type JobRow = Tables<"lesson_jobs">;
 type FileRow = Tables<"lesson_files">;
+type LessonRow = Tables<"lessons">;
+type ProfileRow = Tables<"profiles">;
+type NotificationRow = Tables<"notification_events">;
 type SegmentRow = Tables<"transcript_segments">;
 type WordRow = Tables<"transcript_words">;
-type SegmentInsert = Omit<SegmentRow, "id" | "created_at" | "metadata"> & {
-  id?: string;
-  metadata?: SegmentRow["metadata"];
-  created_at?: string;
-};
-type WordInsert = Omit<WordRow, "id" | "created_at"> & {
-  id?: string;
-  created_at?: string;
-};
+type ExtractionRunRow = Tables<"extraction_runs">;
 
 type Filter = { col: string; value: unknown };
+type AnyRow = Record<string, unknown>;
+type TableName =
+  | "lesson_jobs"
+  | "lesson_files"
+  | "lessons"
+  | "profiles"
+  | "notification_events"
+  | "transcript_segments"
+  | "transcript_words"
+  | "extraction_runs";
 
 export class FakeSupabase {
   jobs: JobRow[] = [];
   files: FileRow[] = [];
+  lessons: LessonRow[] = [];
+  profiles: ProfileRow[] = [];
+  notifications: NotificationRow[] = [];
   transcriptSegments: SegmentRow[] = [];
   transcriptWords: WordRow[] = [];
+  extractionRuns: ExtractionRunRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
   // Toggle to simulate a step failure on the n-th update to the jobs table.
   failOnNextUpdate: { whenStatus?: string; count?: number } | null = null;
 
-  from(table: string) {
-    if (table === "lesson_jobs") return new JobsQuery(this);
-    if (table === "lesson_files") return new FilesQuery(this);
-    if (table === "transcript_segments") return new TranscriptSegmentsQuery(this);
-    if (table === "transcript_words") return new TranscriptWordsQuery(this);
-    throw new Error(`FakeSupabase: unsupported table ${table}`);
+  from(table: TableName) {
+    switch (table) {
+      case "lesson_jobs":
+        return new RowsQuery(this, table, this.jobs);
+      case "lesson_files":
+        return new RowsQuery(this, table, this.files);
+      case "lessons":
+        return new RowsQuery(this, table, this.lessons);
+      case "profiles":
+        return new RowsQuery(this, table, this.profiles);
+      case "notification_events":
+        return new RowsQuery(this, table, this.notifications);
+      case "transcript_segments":
+        return new RowsQuery(this, table, this.transcriptSegments);
+      case "transcript_words":
+        return new RowsQuery(this, table, this.transcriptWords);
+      case "extraction_runs":
+        return new RowsQuery(this, table, this.extractionRuns);
+      default:
+        throw new Error(`FakeSupabase: unsupported table ${table}`);
+    }
   }
 
   storage = {
@@ -52,102 +76,90 @@ export class FakeSupabase {
     }),
   };
 
-  // Convenience helpers for setup.
   insertJob(row: JobRow): void {
     this.jobs.push({ ...row });
   }
   insertFile(row: FileRow): void {
     this.files.push({ ...row });
   }
+  insertLesson(row: LessonRow): void {
+    this.lessons.push({ ...row });
+  }
+  insertProfile(row: ProfileRow): void {
+    this.profiles.push({ ...row });
+  }
   job(): JobRow {
     const job = this.jobs[0];
     if (!job) throw new Error("FakeSupabase: no job row inserted");
     return job;
   }
-}
 
-class JobsQuery {
-  private filters: Filter[] = [];
-  private updatePayload: Partial<JobRow> | null = null;
-  private selectAfterUpdate = false;
-  private isUpdate = false;
-
-  constructor(private parent: FakeSupabase) {}
-
-  select(_cols: string) {
-    if (this.isUpdate) {
-      this.selectAfterUpdate = true;
+  materializeRow(table: TableName, row: AnyRow): AnyRow {
+    const now = new Date().toISOString();
+    if (table === "transcript_segments") {
+      return {
+        id: row.id ?? randomUUID(),
+        metadata: {},
+        created_at: now,
+        ...row,
+      };
     }
-    return this;
-  }
-  eq(col: string, value: unknown) {
-    this.filters.push({ col, value });
-    return this;
-  }
-  update(payload: Partial<JobRow>) {
-    this.isUpdate = true;
-    this.updatePayload = payload;
-    return this;
-  }
-  single(): Promise<{ data: JobRow | null; error: null | { message: string } }> {
-    return this.execSingle();
-  }
-  // Some call sites omit `.single()` (the upload action's trigger_run_id
-  // tag update). Awaiting the builder itself resolves with `{ error }`.
-  then<TResult1 = { error: null | { message: string } }>(
-    resolve: (value: { error: null | { message: string } }) => TResult1,
-  ): Promise<TResult1> {
-    return this.execVoid().then(resolve);
+    if (table === "transcript_words") {
+      return {
+        id: row.id ?? randomUUID(),
+        confidence: null,
+        created_at: now,
+        ...row,
+      };
+    }
+    if (table === "notification_events") {
+      return {
+        id: row.id ?? randomUUID(),
+        payload: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
+    return { ...row };
   }
 
-  private async execSingle() {
-    const matches = this.parent.jobs.filter((j) =>
-      this.filters.every((f) => (j as unknown as Record<string, unknown>)[f.col] === f.value),
-    );
-    if (this.isUpdate && this.updatePayload) {
-      this.maybeThrowSimulatedFailure(matches[0]);
-      for (const job of matches) Object.assign(job, this.updatePayload);
-    }
-    if (matches.length !== 1) return { data: null, error: { message: "not found" } };
-    if (this.isUpdate && !this.selectAfterUpdate) {
-      return { data: null, error: null } as never;
-    }
-    return { data: { ...matches[0]! }, error: null };
-  }
-
-  private async execVoid() {
-    const matches = this.parent.jobs.filter((j) =>
-      this.filters.every((f) => (j as unknown as Record<string, unknown>)[f.col] === f.value),
-    );
-    if (this.isUpdate && this.updatePayload) {
-      this.maybeThrowSimulatedFailure(matches[0]);
-      for (const job of matches) Object.assign(job, this.updatePayload);
-    }
-    return { error: null };
-  }
-
-  private maybeThrowSimulatedFailure(job: JobRow | undefined): void {
-    const fail = this.parent.failOnNextUpdate;
-    if (!fail) return;
-    if (fail.whenStatus && this.updatePayload?.status !== fail.whenStatus) return;
-    this.parent.failOnNextUpdate = null;
-    void job; // currently unused; reserved for richer trigger conditions
-    throw new Error("simulated provider failure");
+  afterDelete(table: TableName, removed: AnyRow[]): void {
+    if (table !== "transcript_segments") return;
+    const removedIds = new Set(removed.map((row) => row.id));
+    this.transcriptWords = this.transcriptWords.filter((word) => !removedIds.has(word.segment_id));
   }
 }
 
-class FilesQuery {
+type Op =
+  | { kind: "select" }
+  | { kind: "update"; payload: AnyRow }
+  | { kind: "delete" }
+  | { kind: "insert"; rows: AnyRow[] }
+  | { kind: "upsert"; rows: AnyRow[]; onConflict: string[]; ignoreDuplicates: boolean };
+
+class RowsQuery<TRow extends object> {
   private filters: Filter[] = [];
+  private inFilters: Array<{ col: string; values: unknown[] }> = [];
   private ordering: { col: string; ascending: boolean } | null = null;
   private rowLimit: number | null = null;
+  private op: Op = { kind: "select" };
 
-  constructor(private parent: FakeSupabase) {}
+  constructor(
+    private parent: FakeSupabase,
+    private table: TableName,
+    private rows: TRow[],
+  ) {}
 
   select(_cols: string) {
     return this;
   }
   eq(col: string, value: unknown) {
     this.filters.push({ col, value });
+    return this;
+  }
+  in(col: string, values: unknown[]) {
+    this.inFilters.push({ col, values });
     return this;
   }
   order(col: string, opts: { ascending: boolean }) {
@@ -158,145 +170,144 @@ class FilesQuery {
     this.rowLimit = n;
     return this;
   }
-  async maybeSingle() {
-    let rows = this.parent.files.filter((r) =>
-      this.filters.every((f) => (r as unknown as Record<string, unknown>)[f.col] === f.value),
-    );
-    if (this.ordering) {
-      const { col, ascending } = this.ordering;
-      rows = [...rows].sort((a, b) => {
-        const av = String((a as Record<string, unknown>)[col]);
-        const bv = String((b as Record<string, unknown>)[col]);
-        return (ascending ? 1 : -1) * av.localeCompare(bv);
-      });
-    }
-    if (this.rowLimit !== null) rows = rows.slice(0, this.rowLimit);
-    return { data: rows[0] ?? null, error: null };
-  }
-}
-
-// Shared insert/delete builder for the transcript tables. The lesson pipeline
-// only needs three verbs against these tables: delete().eq(), insert(rows),
-// and insert(rows).select(cols).
-class TranscriptSegmentsQuery {
-  private filters: Filter[] = [];
-  private mode: "select" | "insert" | "delete" | null = null;
-  private insertRows: SegmentInsert[] = [];
-  private selectInserted = false;
-
-  constructor(private parent: FakeSupabase) {}
-
-  select(_cols: string) {
-    if (this.mode === "insert") {
-      this.selectInserted = true;
-      return this;
-    }
-    this.mode = "select";
+  update(payload: Partial<TRow>) {
+    this.op = { kind: "update", payload: payload as AnyRow };
     return this;
   }
-
-  insert(rows: SegmentInsert | SegmentInsert[]) {
-    this.mode = "insert";
-    this.insertRows = Array.isArray(rows) ? rows : [rows];
-    return this;
-  }
-
   delete() {
-    this.mode = "delete";
+    this.op = { kind: "delete" };
     return this;
   }
-
-  eq(col: string, value: unknown) {
-    this.filters.push({ col, value });
+  insert(payload: Partial<TRow> | Array<Partial<TRow>>) {
+    this.op = {
+      kind: "insert",
+      rows: (Array.isArray(payload) ? payload : [payload]) as AnyRow[],
+    };
     return this;
   }
+  upsert(
+    payload: Partial<TRow> | Array<Partial<TRow>>,
+    opts: { onConflict?: string; ignoreDuplicates?: boolean } = {},
+  ) {
+    const onConflict = (opts.onConflict ?? "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    this.op = {
+      kind: "upsert",
+      rows: (Array.isArray(payload) ? payload : [payload]) as AnyRow[],
+      onConflict,
+      ignoreDuplicates: opts.ignoreDuplicates ?? false,
+    };
+    return this;
+  }
+  async single(): Promise<{ data: TRow | null; error: null | { message: string } }> {
+    const matches = this.applyOp();
+    if (matches.length !== 1) return { data: null, error: { message: "not found" } };
+    return { data: { ...matches[0]! }, error: null };
+  }
+  async maybeSingle(): Promise<{ data: TRow | null; error: null | { message: string } }> {
+    let matches = this.applyOp();
+    if (this.ordering) matches = this.sortRows(matches);
+    if (this.rowLimit !== null) matches = matches.slice(0, this.rowLimit);
+    return { data: matches[0] ? { ...matches[0]! } : null, error: null };
+  }
 
-  // Awaiting the builder triggers the operation. supabase-js returns
-  // `{ data, error }` either inline (insert/select) or empty (delete).
-  then<TResult>(
-    resolve: (value: { data: SegmentRow[] | null; error: null | { message: string } }) => TResult,
+  then<TResult = { data: TRow[] | null; error: null | { message: string } }>(
+    resolve: (value: { data: TRow[] | null; error: null | { message: string } }) => TResult,
   ): Promise<TResult> {
-    return this.exec().then(resolve);
+    return Promise.resolve()
+      .then(() => {
+        let matches = this.applyOp();
+        if (this.ordering) matches = this.sortRows(matches);
+        if (this.rowLimit !== null) matches = matches.slice(0, this.rowLimit);
+        return { data: matches.map((m) => ({ ...m })), error: null } as {
+          data: TRow[] | null;
+          error: null | { message: string };
+        };
+      })
+      .then(resolve);
   }
 
-  private async exec() {
-    if (this.mode === "delete") {
-      const remaining: SegmentRow[] = [];
-      const removed: SegmentRow[] = [];
-      for (const row of this.parent.transcriptSegments) {
-        const matches = this.filters.every(
-          (f) => (row as unknown as Record<string, unknown>)[f.col] === f.value,
-        );
-        if (matches) removed.push(row);
-        else remaining.push(row);
+  private matchesFilters(row: AnyRow): boolean {
+    for (const f of this.filters) if (row[f.col] !== f.value) return false;
+    for (const f of this.inFilters) if (!f.values.includes(row[f.col])) return false;
+    return true;
+  }
+
+  private sortRows(rows: TRow[]): TRow[] {
+    if (!this.ordering) return rows;
+    const { col, ascending } = this.ordering;
+    return [...rows].sort((a, b) => {
+      const av = String((a as AnyRow)[col]);
+      const bv = String((b as AnyRow)[col]);
+      return (ascending ? 1 : -1) * av.localeCompare(bv);
+    });
+  }
+
+  private applyOp(): TRow[] {
+    if (this.op.kind === "select") {
+      return this.rows.filter((row) => this.matchesFilters(row as AnyRow));
+    }
+    if (this.op.kind === "update") {
+      const matches = this.rows.filter((row) => this.matchesFilters(row as AnyRow));
+      this.maybeThrowSimulatedFailure(matches[0] as JobRow | undefined);
+      for (const row of matches) Object.assign(row, this.op.payload);
+      return matches;
+    }
+    if (this.op.kind === "delete") {
+      const survivors: TRow[] = [];
+      const removed: TRow[] = [];
+      for (const row of this.rows) {
+        if (this.matchesFilters(row as AnyRow)) removed.push(row);
+        else survivors.push(row);
       }
-      this.parent.transcriptSegments = remaining;
-      // Cascade-on-delete to the words table.
-      const removedIds = new Set(removed.map((r) => r.id));
-      this.parent.transcriptWords = this.parent.transcriptWords.filter(
-        (w) => !removedIds.has(w.segment_id),
-      );
-      return { data: null, error: null } as { data: SegmentRow[] | null; error: null };
+      this.rows.length = 0;
+      this.rows.push(...survivors);
+      this.parent.afterDelete(this.table, removed as AnyRow[]);
+      return removed;
     }
-
-    if (this.mode === "insert") {
-      const created: SegmentRow[] = this.insertRows.map((row) => ({
-        id: row.id ?? randomUUID(),
-        lesson_id: row.lesson_id,
-        segment_index: row.segment_index,
-        start_ms: row.start_ms,
-        end_ms: row.end_ms,
-        speaker: row.speaker ?? null,
-        language: row.language ?? null,
-        text: row.text,
-        metadata: row.metadata ?? {},
-        created_at: row.created_at ?? new Date().toISOString(),
-      }));
-      this.parent.transcriptSegments.push(...created);
-      if (this.selectInserted) {
-        return { data: created, error: null };
+    if (this.op.kind === "insert") {
+      const inserted = this.op.rows.map((row) =>
+        this.parent.materializeRow(this.table, row),
+      ) as TRow[];
+      this.rows.push(...inserted);
+      return inserted;
+    }
+    if (this.op.kind === "upsert") {
+      const written: TRow[] = [];
+      for (const row of this.op.rows) {
+        const materialized = this.parent.materializeRow(this.table, row);
+        const conflict = this.findConflict(materialized, this.op.onConflict);
+        if (conflict) {
+          if (this.op.ignoreDuplicates) continue;
+          Object.assign(conflict, materialized);
+          written.push(conflict);
+          continue;
+        }
+        const clone = materialized as TRow;
+        this.rows.push(clone);
+        written.push(clone);
       }
-      return { data: null, error: null };
+      return written;
     }
-
-    throw new Error("FakeSupabase: transcript_segments select() not implemented");
-  }
-}
-
-class TranscriptWordsQuery {
-  private mode: "insert" | null = null;
-  private insertRows: WordInsert[] = [];
-
-  constructor(private parent: FakeSupabase) {}
-
-  insert(rows: WordInsert | WordInsert[]) {
-    this.mode = "insert";
-    this.insertRows = Array.isArray(rows) ? rows : [rows];
-    return this;
+    return [];
   }
 
-  then<TResult>(
-    resolve: (value: { error: null | { message: string } }) => TResult,
-  ): Promise<TResult> {
-    return this.exec().then(resolve);
+  private findConflict(candidate: AnyRow, cols: string[]): TRow | undefined {
+    if (cols.length === 0) return undefined;
+    return this.rows.find((existing) =>
+      cols.every((col) => (existing as AnyRow)[col] === candidate[col]),
+    );
   }
 
-  private async exec() {
-    if (this.mode === "insert") {
-      const created: WordRow[] = this.insertRows.map((row) => ({
-        id: row.id ?? randomUUID(),
-        segment_id: row.segment_id,
-        lesson_id: row.lesson_id,
-        word_index: row.word_index,
-        start_ms: row.start_ms,
-        end_ms: row.end_ms,
-        text: row.text,
-        confidence: row.confidence ?? null,
-        created_at: row.created_at ?? new Date().toISOString(),
-      }));
-      this.parent.transcriptWords.push(...created);
-      return { error: null };
-    }
-    throw new Error("FakeSupabase: transcript_words op not implemented");
+  private maybeThrowSimulatedFailure(job: JobRow | undefined): void {
+    const fail = this.parent.failOnNextUpdate;
+    if (!fail) return;
+    if (this.op.kind !== "update") return;
+    if (fail.whenStatus && this.op.payload.status !== fail.whenStatus) return;
+    this.parent.failOnNextUpdate = null;
+    void job;
+    throw new Error("simulated provider failure");
   }
 }

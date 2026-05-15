@@ -2,16 +2,20 @@ import Link from "next/link";
 import { Card, SectionHeader } from "@/components/ui/card";
 import { LessonStatusList } from "@/components/lessons/lesson-status-list";
 import { loadLessonStatusRows, isActiveRow } from "@/lib/lessons/status";
+import { getUser } from "@/lib/auth/get-user";
 
 // Surfaces lessons that are still working their way through the pipeline or
 // have failed, so the household can see what's happening without leaving the
 // home screen — and without blocking daily practice (the section quietly
 // hides when there's nothing to report).
 export async function LessonsInProgressModule() {
-  const rows = await loadLessonStatusRows({
-    limit: 5,
-    statuses: ["queued", "transcribing", "diarizing", "extracting", "generating_audio", "failed"],
-  });
+  const [user, rows] = await Promise.all([
+    getUser(),
+    loadLessonStatusRows({
+      limit: 5,
+      statuses: ["queued", "transcribing", "diarizing", "extracting", "generating_audio", "failed"],
+    }),
+  ]);
 
   if (rows.length === 0) return null;
 
@@ -32,7 +36,7 @@ export async function LessonsInProgressModule() {
           </Link>
         }
       />
-      <LessonStatusList rows={rows} />
+      <LessonStatusList rows={rows} canRetry={user?.isVincent ?? false} />
     </Card>
   );
 }

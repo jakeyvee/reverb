@@ -30,6 +30,10 @@ export default defineConfig({
         find: "@reverb/domain/schemas/lesson-status",
         replacement: path.resolve(here, "../../packages/domain/src/schemas/lesson-status.ts"),
       },
+      {
+        find: "@reverb/media",
+        replacement: path.resolve(here, "../../packages/media/src/index.ts"),
+      },
     ],
   },
   test: {
