@@ -175,14 +175,17 @@ class FilesQuery {
   }
 }
 
-// Shared insert/delete builder for the transcript tables. The lesson pipeline
-// only needs three verbs against these tables: delete().eq(), insert(rows),
-// and insert(rows).select(cols).
+// Shared insert/delete/update/select builder for the transcript_segments
+// table. Models just enough of the supabase-js builder for the lesson pipeline
+// (transcribing's delete+insert+select-after-insert and diarizing's
+// select+update). Awaiting the builder runs whichever mode was selected.
 class TranscriptSegmentsQuery {
   private filters: Filter[] = [];
-  private mode: "select" | "insert" | "delete" | null = null;
+  private mode: "select" | "insert" | "delete" | "update" | null = null;
   private insertRows: SegmentInsert[] = [];
+  private updatePayload: Partial<SegmentRow> | null = null;
   private selectInserted = false;
+  private ordering: { col: string; ascending: boolean } | null = null;
 
   constructor(private parent: FakeSupabase) {}
 
@@ -191,7 +194,7 @@ class TranscriptSegmentsQuery {
       this.selectInserted = true;
       return this;
     }
-    this.mode = "select";
+    if (this.mode === null) this.mode = "select";
     return this;
   }
 
@@ -206,17 +209,34 @@ class TranscriptSegmentsQuery {
     return this;
   }
 
+  update(payload: Partial<SegmentRow>) {
+    this.mode = "update";
+    this.updatePayload = payload;
+    return this;
+  }
+
   eq(col: string, value: unknown) {
     this.filters.push({ col, value });
     return this;
   }
 
+  order(col: string, opts: { ascending: boolean }) {
+    this.ordering = { col, ascending: opts.ascending };
+    return this;
+  }
+
   // Awaiting the builder triggers the operation. supabase-js returns
-  // `{ data, error }` either inline (insert/select) or empty (delete).
+  // `{ data, error }` either inline (insert/select) or empty (delete/update).
   then<TResult>(
     resolve: (value: { data: SegmentRow[] | null; error: null | { message: string } }) => TResult,
   ): Promise<TResult> {
     return this.exec().then(resolve);
+  }
+
+  private matches(row: SegmentRow): boolean {
+    return this.filters.every(
+      (f) => (row as unknown as Record<string, unknown>)[f.col] === f.value,
+    );
   }
 
   private async exec() {
@@ -224,10 +244,7 @@ class TranscriptSegmentsQuery {
       const remaining: SegmentRow[] = [];
       const removed: SegmentRow[] = [];
       for (const row of this.parent.transcriptSegments) {
-        const matches = this.filters.every(
-          (f) => (row as unknown as Record<string, unknown>)[f.col] === f.value,
-        );
-        if (matches) removed.push(row);
+        if (this.matches(row)) removed.push(row);
         else remaining.push(row);
       }
       this.parent.transcriptSegments = remaining;
@@ -247,6 +264,9 @@ class TranscriptSegmentsQuery {
         start_ms: row.start_ms,
         end_ms: row.end_ms,
         speaker: row.speaker ?? null,
+        speaker_confidence: row.speaker_confidence ?? null,
+        speaker_notes: row.speaker_notes ?? null,
+        speaker_low_priority: row.speaker_low_priority ?? false,
         language: row.language ?? null,
         text: row.text,
         metadata: row.metadata ?? {},
@@ -259,7 +279,31 @@ class TranscriptSegmentsQuery {
       return { data: null, error: null };
     }
 
-    throw new Error("FakeSupabase: transcript_segments select() not implemented");
+    if (this.mode === "update" && this.updatePayload) {
+      for (const row of this.parent.transcriptSegments) {
+        if (!this.matches(row)) continue;
+        Object.assign(row, this.updatePayload);
+      }
+      return { data: null, error: null };
+    }
+
+    if (this.mode === "select") {
+      let rows = this.parent.transcriptSegments.filter((r) => this.matches(r));
+      if (this.ordering) {
+        const { col, ascending } = this.ordering;
+        rows = [...rows].sort((a, b) => {
+          const av = (a as unknown as Record<string, unknown>)[col];
+          const bv = (b as unknown as Record<string, unknown>)[col];
+          if (typeof av === "number" && typeof bv === "number") {
+            return (ascending ? 1 : -1) * (av - bv);
+          }
+          return (ascending ? 1 : -1) * String(av).localeCompare(String(bv));
+        });
+      }
+      return { data: rows.map((r) => ({ ...r })), error: null };
+    }
+
+    throw new Error("FakeSupabase: transcript_segments operation not implemented");
   }
 }
 

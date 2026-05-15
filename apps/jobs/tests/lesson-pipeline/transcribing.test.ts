@@ -117,6 +117,28 @@ function fixtureServices(): PipelineServices {
       rawResponse: FIXTURE_RAW,
       model: "whisper-large-v3",
     }),
+    // Diarization labels every fixture segment as 'unknown' with low
+    // confidence so the orchestrator advances past the diarizing stage
+    // without exercising the real Anthropic call. The persistence assertions
+    // below are about transcript_segments / transcript_words, so the speaker
+    // labels written here are intentionally bland.
+    diarize: async ({ sourceTranscriptId, segments }) => ({
+      diarization: {
+        schemaVersion: SCHEMA_VERSIONS.diarization,
+        promptVersion: "stub",
+        model: "stub",
+        sourceTranscriptId,
+        segments: segments.map((s) => ({
+          segmentId: s.id,
+          speaker: "unknown" as const,
+          confidence: 0,
+          lowPriority: false,
+        })),
+      },
+      rawResponse: "{}",
+      model: "stub",
+      promptVersion: "stub",
+    }),
   };
 }
 
@@ -248,6 +270,7 @@ describe("transcribing stage", () => {
       triggerRunId: "run_no_words",
       logger: noopLogger,
       services: {
+        ...fixtureServices(),
         transcribe: async () => ({
           transcript: noWords,
           rawResponse: { ...FIXTURE_RAW, words: undefined },

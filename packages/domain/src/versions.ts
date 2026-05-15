@@ -1,5 +1,6 @@
 export const SCHEMA_VERSIONS = {
   transcript: 1,
+  diarization: 1,
   extractionOutput: 1,
   practiceItem: 1,
   session: 1,

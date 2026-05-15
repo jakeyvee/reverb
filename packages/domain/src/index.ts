@@ -4,6 +4,7 @@ export * from "./schemas/deck.js";
 export * from "./schemas/review.js";
 export * from "./schemas/speaker.js";
 export * from "./schemas/transcript.js";
+export * from "./schemas/diarization.js";
 export * from "./schemas/extraction.js";
 export * from "./schemas/practice.js";
 export * from "./schemas/session.js";

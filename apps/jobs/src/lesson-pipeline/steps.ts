@@ -1,4 +1,10 @@
-import type { Transcript } from "@reverb/domain";
+import { DIARIZATION_PROMPT_VERSION } from "@reverb/ai";
+import type {
+  DiarizationOutput,
+  DiarizationSegmentLabel,
+  SpeakerLabel,
+  Transcript,
+} from "@reverb/domain";
 import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
 import type { PipelineLogger } from "./logger.js";
@@ -174,12 +180,194 @@ function toMs(sec: number): number {
   return Math.round(sec * 1000);
 }
 
-async function diarizingStep({ logger }: StepContext): Promise<StepResult> {
-  // Placeholder for speaker diarization. The real step will assign speaker
-  // labels to existing transcript_segments (so the update is idempotent — same
-  // rows, same indexes, just `speaker` filled in).
-  logger.info("Diarization placeholder — would label transcript_segments");
-  return { details: { placeholder: true } };
+async function diarizingStep(ctx: StepContext): Promise<StepResult> {
+  const { supabase, services, logger, job } = ctx;
+
+  const segments = await loadSegmentsForDiarization(supabase, job.lesson_id);
+  if (segments.length === 0) {
+    logger.info("Diarization skipped — no transcript segments to label", {
+      lessonId: job.lesson_id,
+    });
+    return {
+      details: {
+        provider: "noop",
+        prompt_version: DIARIZATION_PROMPT_VERSION,
+        segment_count: 0,
+        labeled_count: 0,
+        unknown_count: 0,
+        low_priority_count: 0,
+      },
+    };
+  }
+
+  // We send the LLM a stable index-based id (S0, S1, …) and map back to the
+  // database UUID locally. The prompt never sees row uuids, which keeps the
+  // log payload short and the tokens cheap.
+  const idByPromptId = new Map<string, string>();
+  const inputSegments = segments.map((seg) => {
+    const promptId = `S${seg.segment_index}`;
+    idByPromptId.set(promptId, seg.id);
+    return {
+      id: promptId,
+      text: seg.text,
+      startSec: seg.start_ms / 1000,
+      endSec: seg.end_ms / 1000,
+      ...(seg.language ? { language: seg.language } : {}),
+    };
+  });
+
+  const language = pickInputLanguage(segments);
+
+  logger.info("Calling Anthropic diarization", {
+    lessonId: job.lesson_id,
+    segmentCount: inputSegments.length,
+    language,
+  });
+
+  const { diarization, model, promptVersion, rawResponse } = await services.diarize({
+    sourceTranscriptId: job.lesson_id,
+    language,
+    segments: inputSegments,
+  });
+
+  const labelByDbId = mapLabelsToSegmentIds(diarization, idByPromptId);
+  const persistResult = await persistDiarizationLabels(supabase, segments, labelByDbId);
+
+  logger.info("Persisted diarization labels", {
+    lessonId: job.lesson_id,
+    labeled: persistResult.labeledCount,
+    unknown: persistResult.unknownCount,
+    lowPriority: persistResult.lowPriorityCount,
+    missing: persistResult.missingCount,
+  });
+
+  return {
+    details: {
+      provider: "anthropic-diarization",
+      model,
+      prompt_version: promptVersion,
+      schema_version: diarization.schemaVersion,
+      segment_count: segments.length,
+      labeled_count: persistResult.labeledCount,
+      unknown_count: persistResult.unknownCount,
+      low_priority_count: persistResult.lowPriorityCount,
+      // Segments the LLM did not return — we leave their speaker as null so
+      // the UI / extraction can tell apart "didn't know yet" from "labeled
+      // unknown deliberately". Captured here for audit.
+      missing_count: persistResult.missingCount,
+      raw_response: rawResponse,
+    },
+  };
+}
+
+type SegmentForDiarization = {
+  id: string;
+  segment_index: number;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  language: string | null;
+};
+
+async function loadSegmentsForDiarization(
+  supabase: ServiceClient,
+  lessonId: string,
+): Promise<SegmentForDiarization[]> {
+  const { data, error } = await supabase
+    .from("transcript_segments")
+    .select("id, segment_index, text, start_ms, end_ms, language")
+    .eq("lesson_id", lessonId)
+    .order("segment_index", { ascending: true });
+  if (error) {
+    throw new Error(`Could not load transcript_segments for diarization: ${error.message}`);
+  }
+  return (data ?? []) as SegmentForDiarization[];
+}
+
+function pickInputLanguage(segments: SegmentForDiarization[]): string {
+  // Pick the first non-null language hint we have. Whisper sets the same
+  // language on every segment so there is no need to vote — but defensively
+  // fall back to the pipeline default when the field is empty.
+  for (const seg of segments) {
+    if (seg.language) return seg.language;
+  }
+  return DEFAULT_LANGUAGE;
+}
+
+// Match each LLM-emitted label back to its database row. Labels for prompt
+// ids we never sent (the model hallucinated an id) are dropped with a logged
+// warning by the caller — they cannot affect persistence because they have
+// no matching row.
+function mapLabelsToSegmentIds(
+  output: DiarizationOutput,
+  idByPromptId: Map<string, string>,
+): Map<string, DiarizationSegmentLabel> {
+  const result = new Map<string, DiarizationSegmentLabel>();
+  for (const label of output.segments) {
+    const dbId = idByPromptId.get(label.segmentId);
+    if (!dbId) continue;
+    result.set(dbId, label);
+  }
+  return result;
+}
+
+export type PersistDiarizationResult = {
+  labeledCount: number;
+  unknownCount: number;
+  lowPriorityCount: number;
+  /** Segments the LLM did not return a label for; left as speaker=null. */
+  missingCount: number;
+};
+
+// Update each transcript_segments row in place: speaker, confidence, notes,
+// low_priority. The original ASR text is never touched — diarization is a
+// labeling pass, not a rewrite. Segments missing from the LLM response are
+// left untouched (speaker stays null) so a partial response cannot blank out
+// labels from a successful prior attempt.
+export async function persistDiarizationLabels(
+  supabase: ServiceClient,
+  segments: SegmentForDiarization[],
+  labelByDbId: Map<string, DiarizationSegmentLabel>,
+): Promise<PersistDiarizationResult> {
+  let labeled = 0;
+  let unknown = 0;
+  let lowPriority = 0;
+  let missing = 0;
+
+  for (const seg of segments) {
+    const label = labelByDbId.get(seg.id);
+    if (!label) {
+      missing += 1;
+      continue;
+    }
+
+    const speaker = label.speaker satisfies SpeakerLabel;
+    if (speaker === "unknown") unknown += 1;
+    if (label.lowPriority) lowPriority += 1;
+    labeled += 1;
+
+    const { error } = await supabase
+      .from("transcript_segments")
+      .update({
+        speaker,
+        speaker_confidence: label.confidence,
+        speaker_notes: label.notes ?? null,
+        speaker_low_priority: label.lowPriority,
+      })
+      .eq("id", seg.id);
+    if (error) {
+      throw new Error(
+        `Could not update transcript_segments.${seg.id} with diarization label: ${error.message}`,
+      );
+    }
+  }
+
+  return {
+    labeledCount: labeled,
+    unknownCount: unknown,
+    lowPriorityCount: lowPriority,
+    missingCount: missing,
+  };
 }
 
 async function extractingStep({ logger }: StepContext): Promise<StepResult> {
