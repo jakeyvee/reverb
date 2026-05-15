@@ -28,6 +28,8 @@ one, add it to the other.
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | jobs (hosted)          | NO       | Trigger.dev                                     | ai       |
 | `GOOGLE_APPLICATION_CREDENTIALS`      | jobs (local file path) | NO       | `.env.local` only                               | ai       |
 | `RESEND_API_KEY`                      | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | comms    |
+| `RESEND_FROM`                         | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | comms    |
+| `APP_URL`                             | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | platform |
 | `TRIGGER_SECRET_KEY`                  | web (to enqueue)       | NO       | Vercel, `.env.local`                            | platform |
 | `TRIGGER_PROJECT_ID`                  | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | platform |
 | `ALLOWED_EMAILS`                      | web                    | NO       | Vercel, `.env.local`                            | platform |
@@ -66,6 +68,13 @@ one, add it to the other.
   upload-only permission. Compared against the signed-in user's email in the
   web app, and used by `apps/jobs` to address Resend inbound forwards. Must
   also appear in `ALLOWED_EMAILS`.
+- **`RESEND_FROM`** — `From:` header used for lesson-ready and lesson-failed
+  emails. Must be on a Resend-verified domain in production; defaults to
+  Resend's sandbox sender (`Reverb <onboarding@resend.dev>`) when unset so
+  local dev doesn't refuse to send.
+- **`APP_URL`** — public base URL the email CTAs point at (no trailing slash,
+  e.g. `https://reverb.example.com`). Defaults to `http://localhost:3000`
+  when unset; deliverable production links require this to be set.
 - **`HOUSEHOLD_TIMEZONE`** — IANA name (e.g. `America/Los_Angeles`). Used by
   schedulers for daily rollovers; not browser-public to keep server time-zone
   logic authoritative.
