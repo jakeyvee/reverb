@@ -1,11 +1,35 @@
 import { describe, expect, it } from "vitest";
 import type { Tables } from "@reverb/db/types";
 import { LESSON_AUDIO_BUCKET } from "@reverb/domain/schemas/upload";
+import { SCHEMA_VERSIONS, type Transcript } from "@reverb/domain";
 import { runLessonPipeline } from "../../src/lesson-pipeline/orchestrator.js";
 import { getCompletedStages, type ServiceClient } from "../../src/lesson-pipeline/state.js";
+import type { PipelineServices } from "../../src/lesson-pipeline/services.js";
 import { WORKER_STAGES } from "../../src/lesson-pipeline/types.js";
 import { noopLogger } from "../../src/lesson-pipeline/logger.js";
 import { FakeSupabase } from "./fake-supabase.js";
+
+// Tests inject this stub so they can drive the orchestrator without booting
+// the real Groq Whisper adapter. The transcript is intentionally empty: the
+// stages just need to walk forward; per-row persistence is covered separately
+// by `transcribing.test.ts`.
+function stubServices(): PipelineServices {
+  return {
+    transcribe: async ({ sourceId, language }) => {
+      const transcript: Transcript = {
+        schemaVersion: SCHEMA_VERSIONS.transcript,
+        sourceId,
+        language,
+        durationSec: 0,
+        provider: "groq-whisper",
+        model: "whisper-large-v3",
+        segments: [],
+        createdAt: new Date(0).toISOString(),
+      };
+      return { transcript, rawResponse: { text: "" }, model: "whisper-large-v3" };
+    },
+  };
+}
 
 const LESSON_ID = "11111111-2222-3333-4444-555555555555";
 const HOUSEHOLD_ID = "household-1";
@@ -68,6 +92,7 @@ describe("runLessonPipeline", () => {
       payload: { lessonId: LESSON_ID },
       triggerRunId: "run_abc",
       logger: noopLogger,
+      services: stubServices(),
     });
 
     expect(result.status).toBe("ready");
@@ -115,6 +140,7 @@ describe("runLessonPipeline", () => {
       payload: { lessonId: LESSON_ID },
       triggerRunId: "run_xyz",
       logger: noopLogger,
+      services: stubServices(),
     });
 
     expect(result.skipped).toBe(true);
@@ -151,6 +177,7 @@ describe("runLessonPipeline", () => {
       payload: { lessonId: LESSON_ID },
       triggerRunId: "run_retry",
       logger: noopLogger,
+      services: stubServices(),
     });
 
     expect(result.status).toBe("ready");
@@ -187,6 +214,7 @@ describe("runLessonPipeline", () => {
         payload: { lessonId: LESSON_ID },
         triggerRunId: "run_boom",
         logger: noopLogger,
+        services: stubServices(),
       }),
     ).rejects.toThrow(/simulated provider failure/);
 
@@ -221,6 +249,7 @@ describe("runLessonPipeline", () => {
         payload: { lessonId: LESSON_ID },
         triggerRunId: "run_no_audio",
         logger: noopLogger,
+        services: stubServices(),
       }),
     ).rejects.toThrow(/no audio_source row/);
 
@@ -242,6 +271,7 @@ describe("runLessonPipeline", () => {
         payload: { lessonId: "not-a-uuid" },
         triggerRunId: null,
         logger: noopLogger,
+        services: stubServices(),
       }),
     ).rejects.toThrow();
   });

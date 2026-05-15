@@ -5,6 +5,7 @@
 // Keeping the fake in tests/ rather than dressing it up as a full mock keeps
 // it obvious which paths are exercised. If a future code change reaches for a
 // new method, the fake will throw at test time and we'll add it explicitly.
+import { randomUUID } from "node:crypto";
 import type { Tables } from "@reverb/db/types";
 
 type JobRow = Tables<"lesson_jobs">;
@@ -12,12 +13,21 @@ type FileRow = Tables<"lesson_files">;
 type LessonRow = Tables<"lessons">;
 type ProfileRow = Tables<"profiles">;
 type NotificationRow = Tables<"notification_events">;
-type TranscriptSegmentRow = Tables<"transcript_segments">;
+type SegmentRow = Tables<"transcript_segments">;
+type WordRow = Tables<"transcript_words">;
 type ExtractionRunRow = Tables<"extraction_runs">;
 
 type Filter = { col: string; value: unknown };
-
 type AnyRow = Record<string, unknown>;
+type TableName =
+  | "lesson_jobs"
+  | "lesson_files"
+  | "lessons"
+  | "profiles"
+  | "notification_events"
+  | "transcript_segments"
+  | "transcript_words"
+  | "extraction_runs";
 
 export class FakeSupabase {
   jobs: JobRow[] = [];
@@ -25,7 +35,8 @@ export class FakeSupabase {
   lessons: LessonRow[] = [];
   profiles: ProfileRow[] = [];
   notifications: NotificationRow[] = [];
-  transcriptSegments: TranscriptSegmentRow[] = [];
+  transcriptSegments: SegmentRow[] = [];
+  transcriptWords: WordRow[] = [];
   extractionRuns: ExtractionRunRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
@@ -33,22 +44,24 @@ export class FakeSupabase {
   // Toggle to simulate a step failure on the n-th update to the jobs table.
   failOnNextUpdate: { whenStatus?: string; count?: number } | null = null;
 
-  from(table: string) {
+  from(table: TableName) {
     switch (table) {
       case "lesson_jobs":
-        return new RowsQuery<JobRow>(this, this.jobs, this);
+        return new RowsQuery(this, table, this.jobs);
       case "lesson_files":
-        return new RowsQuery<FileRow>(this, this.files, this);
+        return new RowsQuery(this, table, this.files);
       case "lessons":
-        return new RowsQuery<LessonRow>(this, this.lessons, this);
+        return new RowsQuery(this, table, this.lessons);
       case "profiles":
-        return new RowsQuery<ProfileRow>(this, this.profiles, this);
+        return new RowsQuery(this, table, this.profiles);
       case "notification_events":
-        return new RowsQuery<NotificationRow>(this, this.notifications, this);
+        return new RowsQuery(this, table, this.notifications);
       case "transcript_segments":
-        return new RowsQuery<TranscriptSegmentRow>(this, this.transcriptSegments, this);
+        return new RowsQuery(this, table, this.transcriptSegments);
+      case "transcript_words":
+        return new RowsQuery(this, table, this.transcriptWords);
       case "extraction_runs":
-        return new RowsQuery<ExtractionRunRow>(this, this.extractionRuns, this);
+        return new RowsQuery(this, table, this.extractionRuns);
       default:
         throw new Error(`FakeSupabase: unsupported table ${table}`);
     }
@@ -63,7 +76,6 @@ export class FakeSupabase {
     }),
   };
 
-  // Convenience helpers for setup.
   insertJob(row: JobRow): void {
     this.jobs.push({ ...row });
   }
@@ -81,6 +93,42 @@ export class FakeSupabase {
     if (!job) throw new Error("FakeSupabase: no job row inserted");
     return job;
   }
+
+  materializeRow(table: TableName, row: AnyRow): AnyRow {
+    const now = new Date().toISOString();
+    if (table === "transcript_segments") {
+      return {
+        id: row.id ?? randomUUID(),
+        metadata: {},
+        created_at: now,
+        ...row,
+      };
+    }
+    if (table === "transcript_words") {
+      return {
+        id: row.id ?? randomUUID(),
+        confidence: null,
+        created_at: now,
+        ...row,
+      };
+    }
+    if (table === "notification_events") {
+      return {
+        id: row.id ?? randomUUID(),
+        payload: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
+    return { ...row };
+  }
+
+  afterDelete(table: TableName, removed: AnyRow[]): void {
+    if (table !== "transcript_segments") return;
+    const removedIds = new Set(removed.map((row) => row.id));
+    this.transcriptWords = this.transcriptWords.filter((word) => !removedIds.has(word.segment_id));
+  }
 }
 
 type Op =
@@ -90,22 +138,20 @@ type Op =
   | { kind: "insert"; rows: AnyRow[] }
   | { kind: "upsert"; rows: AnyRow[]; onConflict: string[]; ignoreDuplicates: boolean };
 
-class RowsQuery<TRow extends AnyRow> {
+class RowsQuery<TRow extends object> {
   private filters: Filter[] = [];
   private inFilters: Array<{ col: string; values: unknown[] }> = [];
   private ordering: { col: string; ascending: boolean } | null = null;
   private rowLimit: number | null = null;
-  private selectAfter = false;
   private op: Op = { kind: "select" };
 
   constructor(
     private parent: FakeSupabase,
+    private table: TableName,
     private rows: TRow[],
-    private rootForFailure: FakeSupabase,
   ) {}
 
   select(_cols: string) {
-    this.selectAfter = true;
     return this;
   }
   eq(col: string, value: unknown) {
@@ -132,20 +178,24 @@ class RowsQuery<TRow extends AnyRow> {
     this.op = { kind: "delete" };
     return this;
   }
-  insert(payload: TRow | TRow[]) {
-    const rows = Array.isArray(payload) ? payload : [payload];
-    this.op = { kind: "insert", rows: rows as AnyRow[] };
+  insert(payload: Partial<TRow> | Array<Partial<TRow>>) {
+    this.op = {
+      kind: "insert",
+      rows: (Array.isArray(payload) ? payload : [payload]) as AnyRow[],
+    };
     return this;
   }
-  upsert(payload: TRow | TRow[], opts: { onConflict?: string; ignoreDuplicates?: boolean } = {}) {
-    const rows = Array.isArray(payload) ? payload : [payload];
+  upsert(
+    payload: Partial<TRow> | Array<Partial<TRow>>,
+    opts: { onConflict?: string; ignoreDuplicates?: boolean } = {},
+  ) {
     const onConflict = (opts.onConflict ?? "")
       .split(",")
       .map((c) => c.trim())
       .filter(Boolean);
     this.op = {
       kind: "upsert",
-      rows: rows as AnyRow[],
+      rows: (Array.isArray(payload) ? payload : [payload]) as AnyRow[],
       onConflict,
       ignoreDuplicates: opts.ignoreDuplicates ?? false,
     };
@@ -163,9 +213,6 @@ class RowsQuery<TRow extends AnyRow> {
     return { data: matches[0] ? { ...matches[0]! } : null, error: null };
   }
 
-  // Awaiting the builder directly resolves to the "no .single() requested"
-  // path: for selects that returns the array, for mutations it returns the
-  // matched (or written) rows so callers using `.select()` get them back.
   then<TResult = { data: TRow[] | null; error: null | { message: string } }>(
     resolve: (value: { data: TRow[] | null; error: null | { message: string } }) => TResult,
   ): Promise<TResult> {
@@ -184,9 +231,7 @@ class RowsQuery<TRow extends AnyRow> {
 
   private matchesFilters(row: AnyRow): boolean {
     for (const f of this.filters) if (row[f.col] !== f.value) return false;
-    for (const f of this.inFilters) {
-      if (!f.values.includes(row[f.col])) return false;
-    }
+    for (const f of this.inFilters) if (!f.values.includes(row[f.col])) return false;
     return true;
   }
 
@@ -202,10 +247,10 @@ class RowsQuery<TRow extends AnyRow> {
 
   private applyOp(): TRow[] {
     if (this.op.kind === "select") {
-      return this.rows.filter((r) => this.matchesFilters(r as AnyRow));
+      return this.rows.filter((row) => this.matchesFilters(row as AnyRow));
     }
     if (this.op.kind === "update") {
-      const matches = this.rows.filter((r) => this.matchesFilters(r as AnyRow));
+      const matches = this.rows.filter((row) => this.matchesFilters(row as AnyRow));
       this.maybeThrowSimulatedFailure(matches[0] as JobRow | undefined);
       for (const row of matches) Object.assign(row, this.op.payload);
       return matches;
@@ -219,32 +264,32 @@ class RowsQuery<TRow extends AnyRow> {
       }
       this.rows.length = 0;
       this.rows.push(...survivors);
+      this.parent.afterDelete(this.table, removed as AnyRow[]);
       return removed;
     }
     if (this.op.kind === "insert") {
-      const inserted: TRow[] = [];
-      for (const row of this.op.rows) {
-        const clone = { ...row } as TRow;
-        this.rows.push(clone);
-        inserted.push(clone);
-      }
+      const inserted = this.op.rows.map((row) =>
+        this.parent.materializeRow(this.table, row),
+      ) as TRow[];
+      this.rows.push(...inserted);
       return inserted;
     }
     if (this.op.kind === "upsert") {
-      const inserted: TRow[] = [];
+      const written: TRow[] = [];
       for (const row of this.op.rows) {
-        const conflict = this.findConflict(row, this.op.onConflict);
+        const materialized = this.parent.materializeRow(this.table, row);
+        const conflict = this.findConflict(materialized, this.op.onConflict);
         if (conflict) {
           if (this.op.ignoreDuplicates) continue;
-          Object.assign(conflict, row);
-          inserted.push(conflict);
+          Object.assign(conflict, materialized);
+          written.push(conflict);
           continue;
         }
-        const clone = { ...row } as TRow;
+        const clone = materialized as TRow;
         this.rows.push(clone);
-        inserted.push(clone);
+        written.push(clone);
       }
-      return inserted;
+      return written;
     }
     return [];
   }
@@ -252,16 +297,16 @@ class RowsQuery<TRow extends AnyRow> {
   private findConflict(candidate: AnyRow, cols: string[]): TRow | undefined {
     if (cols.length === 0) return undefined;
     return this.rows.find((existing) =>
-      cols.every((c) => (existing as AnyRow)[c] === candidate[c]),
+      cols.every((col) => (existing as AnyRow)[col] === candidate[col]),
     );
   }
 
   private maybeThrowSimulatedFailure(job: JobRow | undefined): void {
-    const fail = this.rootForFailure.failOnNextUpdate;
+    const fail = this.parent.failOnNextUpdate;
     if (!fail) return;
     if (this.op.kind !== "update") return;
     if (fail.whenStatus && this.op.payload.status !== fail.whenStatus) return;
-    this.rootForFailure.failOnNextUpdate = null;
+    this.parent.failOnNextUpdate = null;
     void job;
     throw new Error("simulated provider failure");
   }
