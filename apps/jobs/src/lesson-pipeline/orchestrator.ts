@@ -4,11 +4,13 @@ import {
   failRun,
   loadJobByLesson,
   loadSourceAudio,
+  resetFailedStage,
   startRun,
   type JobRow,
   type ServiceClient,
 } from "./state.js";
-import { runStage } from "./steps.js";
+import { recordLessonNotification } from "./notifications.js";
+import { runStage, type StepHandlerMap, STEPS } from "./steps.js";
 import type { PipelineLogger } from "./logger.js";
 import {
   ProcessLessonPayloadSchema,
@@ -22,6 +24,9 @@ export type RunPipelineInput = {
   payload: ProcessLessonPayload | unknown;
   triggerRunId: string | null;
   logger: PipelineLogger;
+  // Optional injection seam for tests. Defaults to the production step map so
+  // the Trigger.dev task does not need to pass anything explicit.
+  steps?: StepHandlerMap;
 };
 
 export type RunPipelineResult =
@@ -34,6 +39,7 @@ export type RunPipelineResult =
 export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPipelineResult> {
   const payload = ProcessLessonPayloadSchema.parse(input.payload);
   const { supabase, logger, triggerRunId } = input;
+  const steps = input.steps ?? STEPS;
 
   let job: JobRow = await loadJobByLesson(supabase, payload.lessonId);
 
@@ -47,6 +53,15 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
       status: "ready",
       skipped: true,
     };
+  }
+
+  // Retry path: clear the previously-failed stage's completion marker and
+  // wipe any derived rows that aren't safe to leave around (see
+  // `STAGE_RESET_HOOKS` in state.ts). Stages with deterministic upsert keys
+  // are no-ops here; the destructive work is concentrated in stages that
+  // would otherwise append duplicates on a re-run.
+  if (job.status === "failed") {
+    job = await resetFailedStage(supabase, job);
   }
 
   job = await startRun(supabase, job, triggerRunId);
@@ -67,7 +82,7 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
       currentStage = stage;
       job = await advanceStatus(supabase, job, stage);
       logger.info(`Entering stage: ${stage}`, { lessonId: payload.lessonId, jobId: job.id });
-      job = await runStage({ supabase, job, source, logger }, stage);
+      job = await runStage({ supabase, job, source, logger }, stage, steps);
     }
     job = await advanceStatus(supabase, job, "ready");
     job = await completeRun(supabase, job);
@@ -79,12 +94,27 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
       stage: currentStage,
       message: summary,
     });
-    await failRun(supabase, job, currentStage, summary);
+    const failedJob = await failRun(supabase, job, currentStage, summary);
+    // Notify household members in-app. Idempotent: if a previous attempt
+    // already wrote a lesson_failed row for this lesson, the unique index
+    // makes this a no-op.
+    await recordLessonNotification(
+      supabase,
+      failedJob,
+      "lesson_failed",
+      { errorSummary: summary, stage: currentStage },
+      logger,
+    );
     // Re-throw so Trigger.dev marks the run failed and applies the configured
     // retry policy. The stage is already recorded on the row, so the next
     // attempt resumes from `currentStage`.
     throw err;
   }
+
+  // Successful completion: emit lesson_ready in-app records. Same dedupe
+  // contract — re-entering on an already-ready job short-circuits before
+  // this point, so a second emission is impossible.
+  await recordLessonNotification(supabase, job, "lesson_ready", {}, logger);
 
   logger.info("Lesson pipeline complete", { lessonId: payload.lessonId, jobId: job.id });
   return {

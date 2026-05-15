@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Theme } from "@/lib/theme/cookie";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { UploadIcon } from "@/components/ui/icons";
+import { NotificationsBell } from "./notifications-bell";
 
 type Props = {
   theme: Theme;
@@ -25,6 +26,7 @@ export function TopBar({ theme, userEmail, canUpload }: Props) {
             <span className="hidden sm:inline">Upload</span>
           </Link>
         ) : null}
+        <NotificationsBell />
         <ThemeToggle current={theme} />
         {userEmail ? (
           <span
