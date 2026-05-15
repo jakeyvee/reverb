@@ -33,6 +33,9 @@ one, add it to the other.
 | `ALLOWED_EMAILS`                      | web                    | NO       | Vercel, `.env.local`                            | platform |
 | `VINCENT_UPLOAD_EMAIL`                | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | content  |
 | `HOUSEHOLD_TIMEZONE`                  | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | platform |
+| `MEDIA_SILENCE_TRIM_ENABLED`          | jobs                   | NO       | Trigger.dev (optional)                          | platform |
+| `MEDIA_FFMPEG_PATH`                   | jobs (optional)        | NO       | Trigger.dev / `.env.local`                      | platform |
+| `MEDIA_FFPROBE_PATH`                  | jobs (optional)        | NO       | Trigger.dev / `.env.local`                      | platform |
 
 ### Notes per variable
 
@@ -66,6 +69,14 @@ one, add it to the other.
 - **`HOUSEHOLD_TIMEZONE`** — IANA name (e.g. `America/Los_Angeles`). Used by
   schedulers for daily rollovers; not browser-public to keep server time-zone
   logic authoritative.
+- **`MEDIA_SILENCE_TRIM_ENABLED`** — opt-in flag for the silence-trim cost
+  optimisation in the lesson pipeline. Off by default because `silenceremove`
+  is brittle on lossy inputs (see `packages/media/src/silence.ts` for the
+  rationale and follow-up plan). Truthy values: `1`, `true`, `yes`, `on`.
+- **`MEDIA_FFMPEG_PATH`** / **`MEDIA_FFPROBE_PATH`** — optional overrides for
+  the static binaries shipped by `ffmpeg-static` / `ffprobe-static`. Useful
+  if you want to point at a host ffmpeg in local dev or a Trigger.dev image
+  with a bundled copy.
 
 ## Per-environment expectations
 
