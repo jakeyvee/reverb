@@ -12,6 +12,7 @@ packages/
   db/         Supabase client, migrations, RLS, seed helpers
   domain/     Zod schemas + shared TypeScript types
   ai/         Groq, Anthropic, Google TTS adapters and prompts
+  media/      ffmpeg/ffprobe helpers (clip extraction, probing, silence trim)
   srs/        FSRS scheduling helpers (ts-fsrs)
   config/     Shared TS / ESLint / Prettier / Tailwind config
 ```

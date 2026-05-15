@@ -168,15 +168,10 @@ export async function markStageCompleted(
   stage: WorkerStage,
   details?: Record<string, unknown>,
 ): Promise<JobRow> {
+  const baseMetadata = providerMetadataObject(job.provider_metadata);
   const existing = getCompletedStages(job.provider_metadata);
   const completion: StageCompletion = { completed_at: new Date().toISOString() };
   const stages: StageCompletionMap = { ...existing, [stage]: completion };
-  const baseMetadata =
-    job.provider_metadata &&
-    typeof job.provider_metadata === "object" &&
-    !Array.isArray(job.provider_metadata)
-      ? (job.provider_metadata as Record<string, unknown>)
-      : {};
   const nextMetadata = {
     ...baseMetadata,
     stages,
@@ -220,13 +215,8 @@ export async function failRun(
   job: JobRow,
   stage: WorkerStage | null,
   errorSummary: string,
-): Promise<void> {
-  const baseMetadata =
-    job.provider_metadata &&
-    typeof job.provider_metadata === "object" &&
-    !Array.isArray(job.provider_metadata)
-      ? (job.provider_metadata as Record<string, unknown>)
-      : {};
+): Promise<JobRow> {
+  const baseMetadata = providerMetadataObject(job.provider_metadata);
   const nextMetadata = {
     ...baseMetadata,
     last_failure: {
@@ -235,7 +225,7 @@ export async function failRun(
       failed_at: new Date().toISOString(),
     },
   };
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("lesson_jobs")
     .update({
       status: "failed" satisfies LessonProcessingStatus,
@@ -243,11 +233,127 @@ export async function failRun(
       error_summary: errorSummary,
       provider_metadata: nextMetadata,
     })
-    .eq("id", job.id);
-  if (error) {
+    .eq("id", job.id)
+    .select("*")
+    .single();
+  if (error || !data) {
     // Surface the original error, not the bookkeeping failure.
-    console.error(`[lesson-pipeline] failed to record failure on job ${job.id}: ${error.message}`);
+    console.error(
+      `[lesson-pipeline] failed to record failure on job ${job.id}: ${error?.message ?? "no row"}`,
+    );
+    return {
+      ...job,
+      status: "failed",
+      error_summary: errorSummary,
+      provider_metadata: nextMetadata,
+    };
   }
+  return data;
+}
+
+// Identify the stage a previous attempt died inside, if any. Read from
+// `provider_metadata.last_failure.stage`. Returns null when the failure was
+// recorded before the first stage transition (e.g. could not load the source
+// audio) or when the metadata is missing.
+export function lastFailureStage(job: JobRow): WorkerStage | null {
+  const meta = providerMetadataObject(job.provider_metadata);
+  const lastFailure = meta.last_failure;
+  if (!lastFailure || typeof lastFailure !== "object" || Array.isArray(lastFailure)) return null;
+  const stage = (lastFailure as Record<string, unknown>).stage;
+  if (!stage || typeof stage !== "string") return null;
+  if (!(stage in STAGE_RESET_HOOKS)) return null;
+  return stage as WorkerStage;
+}
+
+// Stage resets are the "replace derived rows for that phase" half of VOL-114:
+// before a retry re-runs a previously failed stage, we (a) clear its
+// completion marker so the step actually executes, and (b) wipe any
+// per-stage derived rows that aren't safe to leave behind. Steps that always
+// upsert on a deterministic natural key (transcript_segments on
+// (lesson_id, segment_index), vocab audio at a deterministic storage path)
+// don't need anything here — the unique index keeps replays safe. Stages that
+// insert rows without a natural key (extraction_runs is the obvious one)
+// register a hook here so a retry replaces rather than appends.
+export type StageResetHook = (supabase: ServiceClient, lessonId: string) => Promise<void>;
+
+const STAGE_RESET_HOOKS: Record<WorkerStage, StageResetHook> = {
+  transcribing: async () => {
+    // Transcript writes are upserts keyed on (lesson_id, segment_index) and
+    // (segment_id, word_index). A retry simply overwrites the same rows, so
+    // there's nothing to delete; leaving the rows in place keeps any review-
+    // clip storage paths that already point at them stable.
+  },
+  diarizing: async (supabase, lessonId) => {
+    // Diarization updates segment rows one by one. If a provider or DB error
+    // interrupts the stage, a retry must not combine stale labels from the
+    // failed attempt with a fresh LLM response.
+    const { error } = await supabase
+      .from("transcript_segments")
+      .update({
+        speaker: null,
+        speaker_confidence: null,
+        speaker_notes: null,
+        speaker_low_priority: false,
+      })
+      .eq("lesson_id", lessonId);
+    if (error) {
+      throw new Error(`Could not reset diarization labels for lesson ${lessonId}: ${error.message}`);
+    }
+  },
+  extracting: async (supabase, lessonId) => {
+    const { error } = await supabase.from("extraction_runs").delete().eq("lesson_id", lessonId);
+    if (error) {
+      throw new Error(`Could not reset extraction_runs for lesson ${lessonId}: ${error.message}`);
+    }
+  },
+  generating_audio: async () => {
+    // The TTS step writes clips to deterministic storage paths
+    // (`{householdId}/{lessonId}/clips/{cardId}.mp3`) and updates
+    // vocab_items.audio_storage_path in place. A retry overwrites the object
+    // and the row, so we do not need to clean anything up here.
+  },
+};
+
+export function getStageResetHook(stage: WorkerStage): StageResetHook {
+  return STAGE_RESET_HOOKS[stage];
+}
+
+// Prepare a previously-failed job for a fresh attempt: clear the stage's
+// completion marker (so `runStage` re-runs the step instead of short-
+// circuiting) and replace any derived rows the prior attempt left behind.
+// Safe to call when the job has never failed — the helper short-circuits if
+// `last_failure.stage` is null.
+export async function resetFailedStage(supabase: ServiceClient, job: JobRow): Promise<JobRow> {
+  if (job.status !== "failed") return job;
+  const stage = lastFailureStage(job);
+  if (!stage) return job;
+
+  await STAGE_RESET_HOOKS[stage](supabase, job.lesson_id);
+
+  const baseMetadata = providerMetadataObject(job.provider_metadata);
+  const stages = { ...getCompletedStages(job.provider_metadata) };
+  delete stages[stage];
+  const nextMetadata = { ...baseMetadata, stages };
+
+  const { data, error } = await supabase
+    .from("lesson_jobs")
+    .update({ provider_metadata: nextMetadata })
+    .eq("id", job.id)
+    .select("*")
+    .single();
+  if (error || !data) {
+    throw new Error(
+      `Could not clear completion marker for stage ${stage}: ${error?.message ?? "no row"}`,
+    );
+  }
+  return data;
+}
+
+function providerMetadataObject(meta: JobRow["provider_metadata"]): Record<string, unknown> {
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    return meta as Record<string, unknown>;
+  }
+  return {};
 }
 
 // Storage path conventions (kept here so step implementations stay in sync).

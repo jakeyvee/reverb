@@ -387,7 +387,9 @@ async function generatingAudioStep({ logger }: StepContext): Promise<StepResult>
   return { details: { placeholder: true } };
 }
 
-export const STEPS: Record<WorkerStage, StepHandler> = {
+export type StepHandlerMap = Record<WorkerStage, StepHandler>;
+
+export const STEPS: StepHandlerMap = {
   transcribing: transcribingStep,
   diarizing: diarizingStep,
   extracting: extractingStep,
@@ -396,13 +398,18 @@ export const STEPS: Record<WorkerStage, StepHandler> = {
 
 // Drives a single stage end-to-end. Skips when the stage is already marked
 // complete in provider_metadata so retries pick up exactly where the previous
-// attempt died.
-export async function runStage(ctx: StepContext, stage: WorkerStage): Promise<JobRow> {
+// attempt died. Accepts an explicit map so tests can inject step handlers
+// without monkey-patching the module-level `STEPS` constant.
+export async function runStage(
+  ctx: StepContext,
+  stage: WorkerStage,
+  steps: StepHandlerMap = STEPS,
+): Promise<JobRow> {
   if (isStageCompleted(ctx.job.provider_metadata, stage)) {
     ctx.logger.info(`Skipping ${stage} — already completed on a prior attempt`);
     return ctx.job;
   }
-  const handler = STEPS[stage];
+  const handler = steps[stage];
   const result = await handler(ctx);
   return markStageCompleted(ctx.supabase, ctx.job, stage, result.details);
 }

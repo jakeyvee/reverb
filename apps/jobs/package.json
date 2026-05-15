@@ -17,6 +17,7 @@
     "@reverb/ai": "workspace:*",
     "@reverb/db": "workspace:*",
     "@reverb/domain": "workspace:*",
+    "@reverb/media": "workspace:*",
     "@reverb/srs": "workspace:*",
     "@trigger.dev/sdk": "^3.3.0",
     "zod": "^3.24.1"

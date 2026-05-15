@@ -3,6 +3,18 @@ import { notFound } from "next/navigation";
 import { Card, SectionHeader } from "@/components/ui/card";
 import { DEMO_LESSON, DEMO_LESSON_ID } from "@/lib/demo/lesson";
 import { PlayIcon } from "@/components/ui/icons";
+import { requireUser } from "@/lib/auth/get-user";
+import { loadLessonTranscript, type LessonTranscriptView } from "@/lib/lessons/transcript";
+import { LessonStatusBadge } from "@/components/lessons/lesson-status-badge";
+import { LessonAudioPlayer } from "@/components/lessons/lesson-audio-player";
+import { TranscriptView } from "@/components/lessons/transcript-view";
+import { RetryButton } from "@/components/lessons/retry-button";
+import {
+  isActiveLessonStatus,
+  lessonStatusHint,
+} from "@reverb/domain/schemas/lesson-status";
+
+export const dynamic = "force-dynamic";
 
 type Props = {
   params: Promise<{ lessonId: string }>;
@@ -10,8 +22,107 @@ type Props = {
 
 export default async function LessonDetailPage({ params }: Props) {
   const { lessonId } = await params;
-  if (lessonId !== DEMO_LESSON_ID) notFound();
+  if (lessonId === DEMO_LESSON_ID) {
+    return <DemoLessonView />;
+  }
 
+  // Real lessons require auth + RLS scoping. Demo lesson is intentionally
+  // public-within-the-app so the marketing copy on /lessons still works
+  // before any real upload has happened.
+  await requireUser();
+  const result = await loadLessonTranscript(lessonId);
+  if (!result.ok) notFound();
+
+  const { view } = result;
+  const status = view.job?.status ?? null;
+  const isFailed = status === "failed";
+  const inFlight = status ? isActiveLessonStatus(status) : false;
+  const hint = status ? lessonStatusHint(status) : null;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <Link
+          href="/lessons"
+          className="text-xs text-foreground-subtle transition hover:text-foreground"
+        >
+          ← Lessons
+        </Link>
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold tracking-tight md:text-2xl">{view.lesson.title}</h1>
+            {view.lesson.description ? (
+              <p className="mt-1 text-sm text-foreground-muted">{view.lesson.description}</p>
+            ) : null}
+            <p className="mt-2 text-xs text-foreground-subtle">
+              {formatMeta(view)}
+            </p>
+          </div>
+          {status ? (
+            <div className="shrink-0">
+              <LessonStatusBadge status={status} />
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {isFailed ? (
+        <Card className="flex flex-col gap-2 border-danger/40 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-danger">Processing failed</p>
+            <p className="mt-1 text-xs text-foreground-muted">
+              {view.job?.errorSummary ??
+                "We couldn't finish this lesson. Retry to send it back through the pipeline."}
+            </p>
+          </div>
+          <RetryButton lessonId={view.lesson.id} />
+        </Card>
+      ) : null}
+
+      {hint && inFlight && !isFailed ? (
+        <p className="text-xs text-foreground-subtle">{hint}</p>
+      ) : null}
+
+      {view.audio ? (
+        <section>
+          <SectionHeader
+            title="Lesson audio"
+            description="Spot-check the source recording while you read the transcript."
+          />
+          <Card>
+            <LessonAudioPlayer signedUrl={view.audio.signedUrl} mimeType={view.audio.mimeType} />
+          </Card>
+        </section>
+      ) : null}
+
+      <section>
+        <SectionHeader
+          title="Transcript"
+          description="Raw ASR output. Speaker labels appear once diarization runs."
+        />
+        <TranscriptView segments={view.segments} status={status} />
+      </section>
+    </div>
+  );
+}
+
+function formatMeta(view: LessonTranscriptView): string {
+  const parts: string[] = [];
+  if (view.lesson.targetLanguage) parts.push(view.lesson.targetLanguage);
+  else if (view.lesson.sourceLanguage) parts.push(view.lesson.sourceLanguage);
+  if (view.lesson.durationMs) parts.push(formatDuration(view.lesson.durationMs));
+  parts.push(`${view.segments.length} segment${view.segments.length === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSec / 60);
+  const seconds = totalSec % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function DemoLessonView() {
   return (
     <div className="space-y-6">
       <div>
