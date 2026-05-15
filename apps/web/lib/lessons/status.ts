@@ -4,45 +4,13 @@ import {
   type LessonProcessingStatus,
 } from "@reverb/domain/schemas/lesson-status";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import {
+  mapLessonStatusRow,
+  type LessonStatusRow,
+  type RawLessonRow,
+} from "@/lib/lessons/status-mapping";
 
-export type LessonStatusRow = {
-  id: string;
-  title: string;
-  createdAt: string;
-  durationMs: number | null;
-  processingStatus: LessonProcessingStatus;
-  errorSummary: string | null;
-  attemptCount: number;
-  // Most recent forward motion on the pipeline — used to render "Stuck at
-  // transcribing for 12 minutes" hints without re-deriving from event logs.
-  startedAt: string | null;
-  failedAt: string | null;
-};
-
-type RawJobRow = {
-  status: LessonProcessingStatus;
-  error_summary: string | null;
-  attempt_count: number;
-  started_at: string | null;
-  failed_at: string | null;
-};
-
-// Supabase returns embedded one-to-one relations as a single object when the
-// foreign key has a unique constraint, but older client versions still return
-// a one-element array. We accept either shape and normalise in `pickJob`.
-type RawLessonRow = {
-  id: string;
-  title: string;
-  duration_ms: number | null;
-  created_at: string;
-  lesson_jobs: RawJobRow | RawJobRow[] | null;
-};
-
-function pickJob(value: RawLessonRow["lesson_jobs"]): RawJobRow | null {
-  if (!value) return null;
-  if (Array.isArray(value)) return value[0] ?? null;
-  return value;
-}
+export type { LessonStatusRow } from "@/lib/lessons/status-mapping";
 
 type LoadOpts = {
   limit?: number;
@@ -56,10 +24,10 @@ type LoadOpts = {
 const DEFAULT_LIMIT = 10;
 
 // Fetches recent lessons for the signed-in user's household, joined to their
-// processing job. Lessons without a job row are excluded via `!inner`, so the
-// dev-seed `draft` lesson never shows up on the status surfaces. Returns an
-// empty array when storage isn't configured rather than throwing, so callers
-// can render a friendly empty state.
+// processing job and counts of extracted content. Lessons without a job row
+// are excluded via `!inner`, so the dev-seed `draft` lesson never shows up on
+// the status surfaces. Returns an empty array when storage isn't configured
+// rather than throwing, so callers can render a friendly empty state.
 export async function loadLessonStatusRows(opts: LoadOpts = {}): Promise<LessonStatusRow[]> {
   const supabase = await createServerSupabaseClient();
   if (!supabase) return [];
@@ -69,7 +37,9 @@ export async function loadLessonStatusRows(opts: LoadOpts = {}): Promise<LessonS
   let query = supabase
     .from("lessons")
     .select(
-      "id, title, duration_ms, created_at, lesson_jobs!inner(status, error_summary, attempt_count, started_at, failed_at)",
+      "id, title, duration_ms, created_at," +
+        " lesson_jobs!inner(status, error_summary, attempt_count, started_at, failed_at)," +
+        " vocab_items(count), teacher_corrections(count), grammar_patterns(count)",
     )
     .order("created_at", { ascending: false });
 
@@ -83,22 +53,11 @@ export async function loadLessonStatusRows(opts: LoadOpts = {}): Promise<LessonS
 
   if (error || !data) return [];
 
-  return (data as RawLessonRow[])
-    .map((row): LessonStatusRow | null => {
-      const job = pickJob(row.lesson_jobs);
-      if (!job) return null;
-      return {
-        id: row.id,
-        title: row.title,
-        createdAt: row.created_at,
-        durationMs: row.duration_ms,
-        processingStatus: job.status,
-        errorSummary: job.error_summary,
-        attemptCount: job.attempt_count,
-        startedAt: job.started_at,
-        failedAt: job.failed_at,
-      };
-    })
+  // Supabase's generated types don't model the `relation(count)` aggregate, so
+  // the inferred row type collapses to GenericStringError. Cast via unknown to
+  // the shape we actually pulled.
+  return (data as unknown as RawLessonRow[])
+    .map(mapLessonStatusRow)
     .filter((row): row is LessonStatusRow => row !== null);
 }
 

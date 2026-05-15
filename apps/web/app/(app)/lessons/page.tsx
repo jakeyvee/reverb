@@ -3,15 +3,21 @@ import { Card, EmptyState, SectionHeader } from "@/components/ui/card";
 import { DEMO_LESSON } from "@/lib/demo/lesson";
 import { UploadIcon, PlayIcon } from "@/components/ui/icons";
 import { requireUser } from "@/lib/auth/get-user";
-import { LessonStatusList } from "@/components/lessons/lesson-status-list";
+import { LessonArchiveList } from "@/components/lessons/lesson-archive-list";
 import { loadLessonStatusRows } from "@/lib/lessons/status";
 
 export const dynamic = "force-dynamic";
 
+// Archive surface: every household lesson, ordered newest first, with
+// extracted-content counts and a link to the detail view. We intentionally
+// fetch without a status filter so a recent failure can't push older
+// successful lessons out of the window.
+const ARCHIVE_PAGE_SIZE = 50;
+
 export default async function LessonsPage() {
   const user = await requireUser();
   const canUpload = user.isVincent;
-  const rows = await loadLessonStatusRows({ limit: 20 });
+  const rows = await loadLessonStatusRows({ limit: ARCHIVE_PAGE_SIZE });
 
   return (
     <div className="space-y-6">
@@ -66,16 +72,19 @@ export default async function LessonsPage() {
       </section>
 
       <section>
-        <SectionHeader title="Your lessons" />
+        <SectionHeader
+          title="Your lessons"
+          description={summariseArchive(rows.length)}
+        />
         {rows.length > 0 ? (
-          <LessonStatusList rows={rows} canRetry={canUpload} />
+          <LessonArchiveList rows={rows} canRetry={canUpload} />
         ) : (
           <EmptyState
             title="No lessons yet"
             description={
               canUpload
-                ? "Upload audio, a screenshot, or paste a transcript to generate your first deck."
-                : "Vincent hasn't uploaded a lesson yet. New decks will appear here as soon as they're ready."
+                ? "Upload audio, a screenshot, or paste a transcript to generate your first deck. The demo above is always available for practice."
+                : "Vincent hasn't uploaded a lesson yet. Try the demo lesson above while you wait — new decks will appear here as soon as they're ready."
             }
             action={
               canUpload ? (
@@ -93,4 +102,10 @@ export default async function LessonsPage() {
       </section>
     </div>
   );
+}
+
+function summariseArchive(count: number): string | undefined {
+  if (count === 0) return undefined;
+  if (count === 1) return "1 lesson in the household archive.";
+  return `${count} lessons in the household archive, newest first.`;
 }
