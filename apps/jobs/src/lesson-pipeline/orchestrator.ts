@@ -10,6 +10,7 @@ import {
 } from "./state.js";
 import { runStage } from "./steps.js";
 import type { PipelineLogger } from "./logger.js";
+import { defaultPipelineServices, type PipelineServices } from "./services.js";
 import {
   ProcessLessonPayloadSchema,
   WORKER_STAGES,
@@ -22,6 +23,10 @@ export type RunPipelineInput = {
   payload: ProcessLessonPayload | unknown;
   triggerRunId: string | null;
   logger: PipelineLogger;
+  // Optional override of the provider adapters (Groq Whisper, etc.). Production
+  // code can leave this unset and pick up the real defaults; tests inject stubs
+  // so the orchestrator can be exercised without external network calls.
+  services?: PipelineServices;
 };
 
 export type RunPipelineResult =
@@ -34,6 +39,7 @@ export type RunPipelineResult =
 export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPipelineResult> {
   const payload = ProcessLessonPayloadSchema.parse(input.payload);
   const { supabase, logger, triggerRunId } = input;
+  const services = input.services ?? defaultPipelineServices();
 
   let job: JobRow = await loadJobByLesson(supabase, payload.lessonId);
 
@@ -67,7 +73,7 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
       currentStage = stage;
       job = await advanceStatus(supabase, job, stage);
       logger.info(`Entering stage: ${stage}`, { lessonId: payload.lessonId, jobId: job.id });
-      job = await runStage({ supabase, job, source, logger }, stage);
+      job = await runStage({ supabase, job, source, services, logger }, stage);
     }
     job = await advanceStatus(supabase, job, "ready");
     job = await completeRun(supabase, job);

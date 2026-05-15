@@ -5,16 +5,30 @@
 // Keeping the fake in tests/ rather than dressing it up as a full mock keeps
 // it obvious which paths are exercised. If a future code change reaches for a
 // new method, the fake will throw at test time and we'll add it explicitly.
+import { randomUUID } from "node:crypto";
 import type { Tables } from "@reverb/db/types";
 
 type JobRow = Tables<"lesson_jobs">;
 type FileRow = Tables<"lesson_files">;
+type SegmentRow = Tables<"transcript_segments">;
+type WordRow = Tables<"transcript_words">;
+type SegmentInsert = Omit<SegmentRow, "id" | "created_at" | "metadata"> & {
+  id?: string;
+  metadata?: SegmentRow["metadata"];
+  created_at?: string;
+};
+type WordInsert = Omit<WordRow, "id" | "created_at"> & {
+  id?: string;
+  created_at?: string;
+};
 
 type Filter = { col: string; value: unknown };
 
 export class FakeSupabase {
   jobs: JobRow[] = [];
   files: FileRow[] = [];
+  transcriptSegments: SegmentRow[] = [];
+  transcriptWords: WordRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
@@ -24,6 +38,8 @@ export class FakeSupabase {
   from(table: string) {
     if (table === "lesson_jobs") return new JobsQuery(this);
     if (table === "lesson_files") return new FilesQuery(this);
+    if (table === "transcript_segments") return new TranscriptSegmentsQuery(this);
+    if (table === "transcript_words") return new TranscriptWordsQuery(this);
     throw new Error(`FakeSupabase: unsupported table ${table}`);
   }
 
@@ -156,5 +172,131 @@ class FilesQuery {
     }
     if (this.rowLimit !== null) rows = rows.slice(0, this.rowLimit);
     return { data: rows[0] ?? null, error: null };
+  }
+}
+
+// Shared insert/delete builder for the transcript tables. The lesson pipeline
+// only needs three verbs against these tables: delete().eq(), insert(rows),
+// and insert(rows).select(cols).
+class TranscriptSegmentsQuery {
+  private filters: Filter[] = [];
+  private mode: "select" | "insert" | "delete" | null = null;
+  private insertRows: SegmentInsert[] = [];
+  private selectInserted = false;
+
+  constructor(private parent: FakeSupabase) {}
+
+  select(_cols: string) {
+    if (this.mode === "insert") {
+      this.selectInserted = true;
+      return this;
+    }
+    this.mode = "select";
+    return this;
+  }
+
+  insert(rows: SegmentInsert | SegmentInsert[]) {
+    this.mode = "insert";
+    this.insertRows = Array.isArray(rows) ? rows : [rows];
+    return this;
+  }
+
+  delete() {
+    this.mode = "delete";
+    return this;
+  }
+
+  eq(col: string, value: unknown) {
+    this.filters.push({ col, value });
+    return this;
+  }
+
+  // Awaiting the builder triggers the operation. supabase-js returns
+  // `{ data, error }` either inline (insert/select) or empty (delete).
+  then<TResult>(
+    resolve: (value: { data: SegmentRow[] | null; error: null | { message: string } }) => TResult,
+  ): Promise<TResult> {
+    return this.exec().then(resolve);
+  }
+
+  private async exec() {
+    if (this.mode === "delete") {
+      const remaining: SegmentRow[] = [];
+      const removed: SegmentRow[] = [];
+      for (const row of this.parent.transcriptSegments) {
+        const matches = this.filters.every(
+          (f) => (row as unknown as Record<string, unknown>)[f.col] === f.value,
+        );
+        if (matches) removed.push(row);
+        else remaining.push(row);
+      }
+      this.parent.transcriptSegments = remaining;
+      // Cascade-on-delete to the words table.
+      const removedIds = new Set(removed.map((r) => r.id));
+      this.parent.transcriptWords = this.parent.transcriptWords.filter(
+        (w) => !removedIds.has(w.segment_id),
+      );
+      return { data: null, error: null } as { data: SegmentRow[] | null; error: null };
+    }
+
+    if (this.mode === "insert") {
+      const created: SegmentRow[] = this.insertRows.map((row) => ({
+        id: row.id ?? randomUUID(),
+        lesson_id: row.lesson_id,
+        segment_index: row.segment_index,
+        start_ms: row.start_ms,
+        end_ms: row.end_ms,
+        speaker: row.speaker ?? null,
+        language: row.language ?? null,
+        text: row.text,
+        metadata: row.metadata ?? {},
+        created_at: row.created_at ?? new Date().toISOString(),
+      }));
+      this.parent.transcriptSegments.push(...created);
+      if (this.selectInserted) {
+        return { data: created, error: null };
+      }
+      return { data: null, error: null };
+    }
+
+    throw new Error("FakeSupabase: transcript_segments select() not implemented");
+  }
+}
+
+class TranscriptWordsQuery {
+  private mode: "insert" | null = null;
+  private insertRows: WordInsert[] = [];
+
+  constructor(private parent: FakeSupabase) {}
+
+  insert(rows: WordInsert | WordInsert[]) {
+    this.mode = "insert";
+    this.insertRows = Array.isArray(rows) ? rows : [rows];
+    return this;
+  }
+
+  then<TResult>(
+    resolve: (value: { error: null | { message: string } }) => TResult,
+  ): Promise<TResult> {
+    return this.exec().then(resolve);
+  }
+
+  private async exec() {
+    if (this.mode === "insert") {
+      const created: WordRow[] = this.insertRows.map((row) => ({
+        id: row.id ?? randomUUID(),
+        segment_id: row.segment_id,
+        lesson_id: row.lesson_id,
+        word_index: row.word_index,
+        start_ms: row.start_ms,
+        end_ms: row.end_ms,
+        text: row.text,
+        confidence: row.confidence ?? null,
+        created_at: row.created_at ?? new Date().toISOString(),
+      }));
+      this.parent.transcriptWords.push(...created);
+      return { error: null };
+    }
+    throw new Error("FakeSupabase: transcript_words op not implemented");
   }
 }
