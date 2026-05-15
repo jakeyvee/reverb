@@ -151,7 +151,9 @@ Work top-to-bottom. Each box is independently verifiable.
 - [ ] Project created; project ref recorded.
 - [ ] `prod` and `staging` environments have the full env set.
 - [ ] `pnpm --filter @reverb/jobs run deploy` succeeds.
-- [ ] The `hello` example task runs successfully from the dashboard.
+- [ ] The `process-lesson` task is registered (visible in the Trigger.dev
+      dashboard) and a manual test run from the dashboard succeeds against a
+      seeded lesson row.
 - [ ] `TRIGGER_SECRET_KEY` and `TRIGGER_PROJECT_ID` are mirrored into Vercel.
 
 ### Email (Resend)
