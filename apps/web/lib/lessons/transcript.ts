@@ -13,8 +13,11 @@ export type TranscriptSegmentRow = {
   startMs: number;
   endMs: number;
   speaker: string | null;
+  speakerLowPriority: boolean;
   language: string | null;
   text: string;
+  translation: string | null;
+  translationLanguage: string | null;
 };
 
 export type TranscriptAudio = {
@@ -99,7 +102,9 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
       .maybeSingle(),
     supabase
       .from("transcript_segments")
-      .select("id, segment_index, start_ms, end_ms, speaker, language, text")
+      .select(
+        "id, segment_index, start_ms, end_ms, speaker, speaker_low_priority, language, text, translation, translation_language",
+      )
       .eq("lesson_id", lessonId)
       .order("segment_index", { ascending: true }),
     supabase
@@ -123,8 +128,11 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
     startMs: row.start_ms,
     endMs: row.end_ms,
     speaker: row.speaker,
+    speakerLowPriority: Boolean(row.speaker_low_priority),
     language: row.language,
     text: row.text,
+    translation: row.translation,
+    translationLanguage: row.translation_language,
   }));
 
   let audio: TranscriptAudio | null = null;
