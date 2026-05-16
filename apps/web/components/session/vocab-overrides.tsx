@@ -6,15 +6,25 @@ import {
   extractionFlagReasonLabel,
   type ExtractionFlagReason,
 } from "@reverb/domain/schemas/extraction-flag";
-import { flagExtractedItemAction, markVocabKnownAction } from "@/lib/vocab/overrides";
+import {
+  flagExtractedItemAction,
+  markVocabKnownAction,
+  type MarkVocabKnownResult,
+} from "@/lib/vocab/overrides";
 
 type Props = {
   vocabItemId: string;
+  // When the override fires from inside the daily session runner, this
+  // links the action back to the practice_session_items row so the
+  // server-side path can also mark it answered. Omitted in non-session
+  // contexts (e.g. lesson detail screens).
+  sessionItemId?: string;
   // Called after a successful "I already know this" so the parent can advance
   // past the current card and update its in-memory queue. The action also
   // revalidates `/session`, but for the in-progress runner we want immediate
-  // feedback without waiting for a router refresh.
-  onKnown?: () => void;
+  // feedback without waiting for a router refresh. Receives the action
+  // result so the parent can pull through the updated session counters.
+  onKnown?: (result: Extract<MarkVocabKnownResult, { ok: true }>) => void;
   // Called after a successful flag so the parent can show a "flagged" pill or
   // collapse the affordance. Doesn't auto-advance — flagging is independent
   // of whether the user keeps reviewing the card.
@@ -23,7 +33,7 @@ type Props = {
 
 type Phase = "idle" | "flagging";
 
-export function VocabOverrideControls({ vocabItemId, onKnown, onFlagged }: Props) {
+export function VocabOverrideControls({ vocabItemId, sessionItemId, onKnown, onFlagged }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -33,13 +43,13 @@ export function VocabOverrideControls({ vocabItemId, onKnown, onFlagged }: Props
     setError(null);
     setFeedback(null);
     startTransition(async () => {
-      const result = await markVocabKnownAction({ vocabItemId });
+      const result = await markVocabKnownAction({ vocabItemId, sessionItemId });
       if (!result.ok) {
         setError(result.error);
         return;
       }
       setFeedback("Marked as known. Removing card.");
-      onKnown?.();
+      onKnown?.(result);
     });
   };
 

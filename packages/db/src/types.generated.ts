@@ -1031,6 +1031,7 @@ export type Database = {
           card_id: string | null;
           grammar_exercise_id: string | null;
           dialogue_clip_id: string | null;
+          correction_drill_id: string | null;
           shown_at: string | null;
           answered_at: string | null;
           rating: Database["public"]["Enums"]["review_rating"] | null;
@@ -1047,6 +1048,7 @@ export type Database = {
           card_id?: string | null;
           grammar_exercise_id?: string | null;
           dialogue_clip_id?: string | null;
+          correction_drill_id?: string | null;
           shown_at?: string | null;
           answered_at?: string | null;
           rating?: Database["public"]["Enums"]["review_rating"] | null;
@@ -1063,6 +1065,7 @@ export type Database = {
           card_id?: string | null;
           grammar_exercise_id?: string | null;
           dialogue_clip_id?: string | null;
+          correction_drill_id?: string | null;
           shown_at?: string | null;
           answered_at?: string | null;
           rating?: Database["public"]["Enums"]["review_rating"] | null;
@@ -1097,6 +1100,13 @@ export type Database = {
             columns: ["dialogue_clip_id"];
             isOneToOne: false;
             referencedRelation: "dialogue_clips";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "practice_session_items_correction_drill_id_fkey";
+            columns: ["correction_drill_id"];
+            isOneToOne: false;
+            referencedRelation: "correction_drills";
             referencedColumns: ["id"];
           },
         ];
@@ -1580,7 +1590,7 @@ export type Database = {
       grammar_exercise_kind: "fill_blank" | "multiple_choice" | "translate" | "reorder";
       teacher_correction_kind: "grammar" | "vocabulary" | "pronunciation" | "usage";
       practice_session_status: "active" | "completed" | "abandoned";
-      practice_item_kind: "card" | "grammar_exercise" | "dialogue_clip";
+      practice_item_kind: "card" | "grammar_exercise" | "dialogue_clip" | "mistake_drill";
       practice_event_kind:
         | "session_start"
         | "session_complete"

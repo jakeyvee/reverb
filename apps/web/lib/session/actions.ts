@@ -1,5 +1,7 @@
 "use server";
 
+import { z } from "zod";
+import { createServiceRoleClient } from "@reverb/db/server";
 import {
   CORRECTION_DRILL_XP_PER_PASS,
   CorrectionDrillResultSchema,
@@ -8,7 +10,23 @@ import {
   type CorrectionDrillResult,
 } from "@reverb/domain/schemas/correction-drill";
 import { requireUser } from "@/lib/auth/get-user";
+import { getProfile } from "@/lib/auth/get-profile";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { buildPartnerNudge, loadHomeMetrics } from "@/lib/home/metrics";
+import {
+  completeSession,
+  recordSessionItemAnswer,
+  startOrResumeTodaysSession,
+  type CompleteSessionResult,
+  type DailySessionView,
+} from "@/lib/session/orchestrator";
+import { SHADOWING_XP_PER_PASS } from "@/lib/session/shadowing";
+import {
+  LISTENING_PROMPT_KINDS,
+  gradeListeningTranscription,
+  parseListeningPromptFromMetadata,
+  type ListeningPromptKind,
+} from "@/lib/session/listening-comprehension";
 
 export type RecordDrillAttemptInput = {
   drillId: string;
@@ -18,6 +36,12 @@ export type RecordDrillAttemptInput = {
   userResponse?: string;
   selfMarked?: CorrectionDrillResult;
   responseMs?: number;
+  // Optional session-item link. When provided, recording the answer also
+  // updates the practice_session_items row + the session counters + the
+  // practice_events log. Outside-of-session drills (a future "extra
+  // practice" entry point) just omit this and the session bookkeeping is
+  // skipped.
+  sessionItemId?: string;
 };
 
 export type RecordDrillAttemptResult =
@@ -28,6 +52,14 @@ export type RecordDrillAttemptResult =
       nextDueAt: string;
       xpAwarded: number;
       totalXp: number;
+      // Session counters, set when `sessionItemId` was passed in. The UI
+      // uses these to render live progress without a refetch.
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
     }
   | { ok: false; error: string };
 
@@ -105,7 +137,7 @@ export async function recordCorrectionDrillAttempt(
     result,
     response_ms: input.responseMs ?? null,
     xp_awarded: xpAwarded,
-    user_response: input.mode === "retype" ? input.userResponse ?? null : null,
+    user_response: input.mode === "retype" ? (input.userResponse ?? null) : null,
     attempted_at: now.toISOString(),
   });
   if (insertError) {
@@ -133,11 +165,50 @@ export async function recordCorrectionDrillAttempt(
     return { ok: false, error: updateError.message };
   }
 
-  // Intentionally no revalidatePath here: the MistakeDrillRunner stays mounted
-  // across answers, and a mid-batch refetch would drop the just-answered drill
-  // from the `drills` prop, shifting the runner's index off-by-one and skipping
-  // the next drill. /session is `dynamic = "force-dynamic"`, so the next page
-  // visit fetches fresh data anyway.
+  // Intentionally no revalidatePath here: SessionRunner stays mounted
+  // across answers, and a mid-batch refetch would drop the just-answered
+  // item from its `view.items` snapshot, shifting the runner's index off-
+  // by-one. /session is `dynamic = "force-dynamic"`, so the next full
+  // page visit fetches fresh data anyway.
+
+  type SessionSnapshot = {
+    sessionItemId: string;
+    sessionXpEarned: number;
+    cardsReviewed: number;
+    exercisesAttempted: number;
+  };
+  let sessionSnapshot: SessionSnapshot | undefined;
+  // Mistake drills are "exercise" bucket — they count toward
+  // exercises_attempted, not cards_reviewed. We only record a session item
+  // when the caller passed one in; outside-of-session use stays a single
+  // round-trip.
+  if (input.sessionItemId) {
+    try {
+      const recorded = await recordSessionItemAnswer(supabase, user.id, {
+        sessionItemId: input.sessionItemId,
+        correct: result === "pass",
+        rating: null,
+        responseMs: input.responseMs ?? null,
+        xpAwarded,
+        bucket: "exercise",
+      });
+      sessionSnapshot = {
+        sessionItemId: input.sessionItemId,
+        sessionXpEarned: recorded.sessionXpEarned,
+        cardsReviewed: recorded.cardsReviewed,
+        exercisesAttempted: recorded.exercisesAttempted,
+      };
+    } catch (sessionError) {
+      // The drill answer is already persisted — don't bubble the error to
+      // the user as a failed attempt. Log it so a follow-up can rebuild the
+      // session counters offline if it matters.
+      console.warn(
+        "recordSessionItemAnswer failed for drill",
+        sessionError instanceof Error ? sessionError.message : sessionError,
+      );
+    }
+  }
+
   return {
     ok: true,
     result,
@@ -145,5 +216,321 @@ export async function recordCorrectionDrillAttempt(
     nextDueAt: schedule.nextDueAt.toISOString(),
     xpAwarded,
     totalXp: nextXp,
+    session: sessionSnapshot,
   };
+}
+
+export type StartTodaysSessionResult =
+  | { ok: true; session: DailySessionView }
+  | { ok: false; error: string };
+
+// Server-action wrapper around the orchestrator. Used by the home page's
+// "Start Today's Session" CTA when we want the action surface (and the
+// resulting session id) without rendering `/session` first.
+export async function startTodaysSessionAction(): Promise<StartTodaysSessionResult> {
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+  try {
+    const session = await startOrResumeTodaysSession(supabase, user.id);
+    return { ok: true, session };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
+}
+
+// ---- Shadowing ----------------------------------------------------------
+
+const ShadowingResultSchema = z.enum(["got_it", "try_again"]);
+export type ShadowingSelfMarkResult = z.infer<typeof ShadowingResultSchema>;
+
+const RecordShadowingAttemptInputSchema = z.object({
+  sessionItemId: z.string().uuid(),
+  dialogueClipId: z.string().uuid(),
+  result: ShadowingResultSchema,
+  // We don't persist recordings client-side, but the duration is useful for
+  // event payload + future analytics ("user actually attempted vs. only
+  // listened").
+  recordingMs: z.number().int().nonnegative().max(60_000).optional(),
+  responseMs: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(60 * 60_000)
+    .optional(),
+  // True if the user's browser didn't support MediaRecorder or denied
+  // permission. We still let them self-mark so a session can finish; the
+  // event payload tags this so we can spot environments that aren't gating
+  // shadowing properly.
+  fallback: z.boolean().optional(),
+});
+
+export type RecordShadowingAttemptInput = z.infer<typeof RecordShadowingAttemptInputSchema>;
+
+export type RecordShadowingAttemptResult =
+  | {
+      ok: true;
+      result: ShadowingSelfMarkResult;
+      xpAwarded: number;
+      session: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
+    }
+  | { ok: false; error: string };
+
+// Records a single shadowing self-mark. The MediaRecorder blob never reaches
+// the server — only the user's pass/fail call does. We mirror the drill
+// action's contract so SessionRunner can advance the queue with the same
+// `onAnswered` snapshot shape it already consumes for vocab + drills.
+export async function recordShadowingAttempt(
+  input: RecordShadowingAttemptInput,
+): Promise<RecordShadowingAttemptResult> {
+  const parsed = RecordShadowingAttemptInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid shadowing attempt." };
+  }
+
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+
+  const passed = parsed.data.result === "got_it";
+  const xpAwarded = passed ? SHADOWING_XP_PER_PASS : 0;
+
+  try {
+    const recorded = await recordSessionItemAnswer(supabase, user.id, {
+      sessionItemId: parsed.data.sessionItemId,
+      correct: passed,
+      rating: null,
+      responseMs: parsed.data.responseMs ?? null,
+      xpAwarded,
+      bucket: "exercise",
+      eventKind: "item_answered",
+      eventPayload: {
+        item_type: "shadowing",
+        dialogue_clip_id: parsed.data.dialogueClipId,
+        self_marked: parsed.data.result,
+        recording_ms: parsed.data.recordingMs ?? null,
+        fallback: parsed.data.fallback ?? false,
+      },
+    });
+    return {
+      ok: true,
+      result: parsed.data.result,
+      xpAwarded,
+      session: {
+        sessionItemId: parsed.data.sessionItemId,
+        sessionXpEarned: recorded.sessionXpEarned,
+        cardsReviewed: recorded.cardsReviewed,
+        exercisesAttempted: recorded.exercisesAttempted,
+      },
+    };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
+}
+
+// ---- Listening comprehension --------------------------------------------
+
+// XP awarded for a correct listening answer. Lower than vocab/correction
+// passes because the snippet is shorter and the question type rotates —
+// we want it to feel rewarding without crowding out the SRS-driven kinds.
+// Kept module-private because "use server" forbids non-async exports.
+const LISTENING_XP_PER_CORRECT = 2;
+
+const ListeningAttemptInputSchema = z.object({
+  sessionItemId: z.string().uuid(),
+  promptKind: z.enum(LISTENING_PROMPT_KINDS),
+  // Free-text typed answer for the transcription mode. Used by both the
+  // automatic grader and the (optional) self-mark fallback.
+  typedAnswer: z.string().optional(),
+  // 0-based index into the persisted choices array for MC modes.
+  selectedIndex: z.number().int().nonnegative().optional(),
+  // Self-mark override: when the client passes this, we trust the user's
+  // own assessment (mainly for transcription "close enough" path).
+  selfMarked: z.enum(["pass", "fail"]).optional(),
+  responseMs: z.number().int().nonnegative().optional(),
+});
+
+export type RecordListeningAttemptInput = z.infer<typeof ListeningAttemptInputSchema>;
+
+export type RecordListeningAttemptResult =
+  | {
+      ok: true;
+      correct: boolean;
+      xpAwarded: number;
+      // The canonical answer for the question type, surfaced back so the
+      // UI can show "the speaker said …" or "the correct meaning was …"
+      // without re-deriving it client-side.
+      expected: {
+        promptKind: ListeningPromptKind;
+        text: string | null;
+        choiceIndex: number | null;
+      };
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
+    }
+  | { ok: false; error: string };
+
+export async function recordListeningAttempt(
+  input: RecordListeningAttemptInput,
+): Promise<RecordListeningAttemptResult> {
+  const parsed = ListeningAttemptInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid request." };
+  }
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+
+  const { data: item, error: itemError } = await supabase
+    .from("practice_session_items")
+    .select("id, kind, metadata, answered_at")
+    .eq("id", parsed.data.sessionItemId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (itemError) {
+    return { ok: false, error: itemError.message };
+  }
+  if (!item) {
+    return { ok: false, error: "Session item not found." };
+  }
+  if (item.kind !== "dialogue_clip") {
+    return { ok: false, error: "Session item is not a listening exercise." };
+  }
+  const prompt = parseListeningPromptFromMetadata(item.metadata);
+  if (!prompt) {
+    return { ok: false, error: "Listening prompt is missing or malformed." };
+  }
+  if (prompt.kind !== parsed.data.promptKind) {
+    return { ok: false, error: "Prompt kind mismatch." };
+  }
+
+  let correct = false;
+  if (parsed.data.selfMarked) {
+    correct = parsed.data.selfMarked === "pass";
+  } else if (prompt.kind === "transcription") {
+    const actual = parsed.data.typedAnswer ?? "";
+    if (actual.trim().length === 0) {
+      return { ok: false, error: "Type what you heard before submitting." };
+    }
+    const expected = prompt.expectedText ?? "";
+    correct = gradeListeningTranscription({ expected, actual }) === "pass";
+  } else {
+    const selected = parsed.data.selectedIndex;
+    if (selected === undefined) {
+      return { ok: false, error: "Pick an answer before submitting." };
+    }
+    if (selected < 0 || selected >= prompt.choices.length) {
+      return { ok: false, error: "Selected answer is out of range." };
+    }
+    correct = selected === prompt.answerIndex;
+  }
+
+  const xpAwarded = correct ? LISTENING_XP_PER_CORRECT : 0;
+
+  let sessionSnapshot: Extract<RecordListeningAttemptResult, { ok: true }>["session"];
+  try {
+    const recorded = await recordSessionItemAnswer(supabase, user.id, {
+      sessionItemId: parsed.data.sessionItemId,
+      correct,
+      rating: null,
+      responseMs: parsed.data.responseMs ?? null,
+      xpAwarded,
+      bucket: "exercise",
+      eventPayload: {
+        listening: {
+          prompt_kind: prompt.kind,
+          self_marked: parsed.data.selfMarked ?? null,
+          selected_index: parsed.data.selectedIndex ?? null,
+          typed_answer_length: parsed.data.typedAnswer?.length ?? null,
+        },
+      },
+    });
+    sessionSnapshot = {
+      sessionItemId: parsed.data.sessionItemId,
+      sessionXpEarned: recorded.sessionXpEarned,
+      cardsReviewed: recorded.cardsReviewed,
+      exercisesAttempted: recorded.exercisesAttempted,
+    };
+  } catch (sessionError) {
+    return {
+      ok: false,
+      error: sessionError instanceof Error ? sessionError.message : "Unexpected error.",
+    };
+  }
+
+  return {
+    ok: true,
+    correct,
+    xpAwarded,
+    expected: {
+      promptKind: prompt.kind,
+      text: prompt.expectedText,
+      choiceIndex: prompt.answerIndex,
+    },
+    session: sessionSnapshot,
+  };
+}
+
+export type CompleteSessionActionResult =
+  | {
+      ok: true;
+      summary: CompleteSessionResult;
+      // Session-end nudge text when the user just practised and their
+      // partner hasn't yet today. Null when there's no partner, when both
+      // are done, or when the metrics read failed.
+      partnerNudge: string | null;
+    }
+  | { ok: false; error: string };
+
+// Server action the SessionRunner calls after the last item is answered.
+// Wraps `completeSession` so the UI can show the XP-earned + streak summary
+// without an extra page load.
+export async function completeSessionAction(input: {
+  sessionId: string;
+}): Promise<CompleteSessionActionResult> {
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+  try {
+    const summary = await completeSession(supabase, user.id, input.sessionId);
+    const partnerNudge = await loadPartnerNudge(user.id);
+    return { ok: true, summary, partnerNudge };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
+}
+
+// Best-effort partner-nudge lookup. The completed session is already
+// persisted; if the household metrics read fails we still return the user's
+// XP summary — the nudge is a small flourish, not a load-bearing piece.
+async function loadPartnerNudge(userId: string): Promise<string | null> {
+  try {
+    const profile = await getProfile(userId);
+    if (!profile) return null;
+    const serviceClient = createServiceRoleClient();
+    const metrics = await loadHomeMetrics(serviceClient, {
+      householdId: profile.householdId,
+      currentUserId: userId,
+    });
+    return buildPartnerNudge(metrics);
+  } catch {
+    return null;
+  }
 }
