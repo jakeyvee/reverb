@@ -7,10 +7,11 @@ import { requireUser } from "@/lib/auth/get-user";
 import { loadLessonTranscript, type LessonTranscriptView } from "@/lib/lessons/transcript";
 import { LessonStatusBadge } from "@/components/lessons/lesson-status-badge";
 import { LessonAudioPlayer } from "@/components/lessons/lesson-audio-player";
+import { LessonMasteryPanel } from "@/components/lessons/lesson-mastery";
 import { TranscriptView } from "@/components/lessons/transcript-view";
 import { RetryButton } from "@/components/lessons/retry-button";
 import { ReprocessButton } from "@/components/lessons/reprocess-button";
-import { getUser } from "@/lib/auth/get-user";
+import { isMasteryEmpty, loadLessonMastery } from "@/lib/lessons/mastery";
 import {
   isActiveLessonStatus,
   isTerminalLessonStatus,
@@ -32,8 +33,11 @@ export default async function LessonDetailPage({ params }: Props) {
   // Real lessons require auth + RLS scoping. Demo lesson is intentionally
   // public-within-the-app so the marketing copy on /lessons still works
   // before any real upload has happened.
-  await requireUser();
-  const [user, result] = await Promise.all([getUser(), loadLessonTranscript(lessonId)]);
+  const user = await requireUser();
+  const [result, mastery] = await Promise.all([
+    loadLessonTranscript(lessonId),
+    loadLessonMastery(lessonId, user.id),
+  ]);
   if (!result.ok) notFound();
 
   const { view } = result;
@@ -49,7 +53,7 @@ export default async function LessonDetailPage({ params }: Props) {
   // the worker pipeline, so retry / reprocess affordances would dead-end.
   const isDemo = view.lesson.isDemo;
   const canReprocess =
-    Boolean(user?.isVincent) && !isDemo && status !== null && isTerminalLessonStatus(status);
+    user.isVincent && !isDemo && status !== null && isTerminalLessonStatus(status);
   const hasReprocessHistory = view.extraction.hasHistory;
   const currentVersion = view.extraction.currentVersion;
 
@@ -122,6 +126,16 @@ export default async function LessonDetailPage({ params }: Props) {
           </div>
           <ReprocessButton lessonId={view.lesson.id} disabled={inFlight} />
         </Card>
+      ) : null}
+
+      {mastery && !isMasteryEmpty(mastery) ? (
+        <section>
+          <SectionHeader
+            title="Your mastery"
+            description="Calculated from your practice state — no manual entry."
+          />
+          <LessonMasteryPanel mastery={mastery} />
+        </section>
       ) : null}
 
       {view.audio ? (

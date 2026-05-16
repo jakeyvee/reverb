@@ -5,6 +5,7 @@ import { UploadIcon, PlayIcon } from "@/components/ui/icons";
 import { requireUser } from "@/lib/auth/get-user";
 import { LessonArchiveList } from "@/components/lessons/lesson-archive-list";
 import { loadLessonStatusRows } from "@/lib/lessons/status";
+import { loadLessonMasteryBatch } from "@/lib/lessons/mastery";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,10 @@ export default async function LessonsPage() {
   const user = await requireUser();
   const canUpload = user.isVincent;
   const rows = await loadLessonStatusRows({ limit: ARCHIVE_PAGE_SIZE });
+  const masteryByLesson = await loadLessonMasteryBatch(
+    rows.map((r) => r.id),
+    user.id,
+  );
 
   return (
     <div className="space-y-6">
@@ -72,12 +77,9 @@ export default async function LessonsPage() {
       </section>
 
       <section>
-        <SectionHeader
-          title="Your lessons"
-          description={summariseArchive(rows.length)}
-        />
+        <SectionHeader title="Your lessons" description={summariseArchive(rows.length)} />
         {rows.length > 0 ? (
-          <LessonArchiveList rows={rows} canRetry={canUpload} />
+          <LessonArchiveList rows={rows} canRetry={canUpload} masteryByLesson={masteryByLesson} />
         ) : (
           <EmptyState
             title="No lessons yet"
