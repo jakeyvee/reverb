@@ -398,6 +398,11 @@ function CompletionSummary({
         Longest streak: {summary.streak.longestLength} day
         {summary.streak.longestLength === 1 ? "" : "s"}.
       </p>
+      {summary.streak.freePassApplied ? (
+        <p className="max-w-xs rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+          Free-pass used to keep your streak — you can miss one day per month without losing it.
+        </p>
+      ) : null}
       {result.partnerNudge ? (
         <p className="mt-2 max-w-xs rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-xs text-foreground-muted">
           {result.partnerNudge}

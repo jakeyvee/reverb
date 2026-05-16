@@ -84,6 +84,9 @@ importers:
       '@reverb/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@reverb/email':
+        specifier: workspace:*
+        version: link:../../packages/email
       '@reverb/srs':
         specifier: workspace:*
         version: link:../../packages/srs

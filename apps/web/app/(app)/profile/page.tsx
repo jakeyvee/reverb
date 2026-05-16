@@ -1,10 +1,12 @@
 import { Card, SectionHeader } from "@/components/ui/card";
 import { getUser } from "@/lib/auth/get-user";
+import { getProfile } from "@/lib/auth/get-profile";
 import { readTheme } from "@/lib/theme/cookie";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 
 export default async function ProfilePage() {
   const [user, theme] = await Promise.all([getUser(), readTheme()]);
+  const profile = user ? await getProfile(user.id) : null;
 
   return (
     <div className="space-y-6">
@@ -26,6 +28,26 @@ export default async function ProfilePage() {
         <Card>
           <p className="text-sm text-foreground-muted">
             Partner pairing arrives with the couple-streaks ticket.
+          </p>
+        </Card>
+      </section>
+
+      <section>
+        <SectionHeader title="Reminders" />
+        <Card className="space-y-2">
+          <Field
+            label="Daily email"
+            value={
+              profile === null
+                ? "—"
+                : profile.reminderEnabled
+                  ? `On at ${profile.reminderTime.slice(0, 5)} ${profile.timezone}`
+                  : "Off"
+            }
+          />
+          <p className="text-xs text-foreground-subtle">
+            Email reminders fire once per day at the time you set during onboarding. Re-run
+            onboarding to change them.
           </p>
         </Card>
       </section>

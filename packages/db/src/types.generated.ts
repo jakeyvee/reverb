@@ -1189,6 +1189,73 @@ export type Database = {
         };
         Relationships: [];
       };
+      streak_free_pass_uses: {
+        Row: {
+          user_id: string;
+          month_key: string;
+          applied_for_date: string;
+          used_on: string;
+          session_id: string | null;
+          created_at: string;
+        };
+        Insert: {
+          user_id: string;
+          month_key: string;
+          applied_for_date: string;
+          used_on: string;
+          session_id?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          user_id?: string;
+          month_key?: string;
+          applied_for_date?: string;
+          used_on?: string;
+          session_id?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "streak_free_pass_uses_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "practice_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      streak_reminder_log: {
+        Row: {
+          user_id: string;
+          reminder_date: string;
+          channel: Database["public"]["Enums"]["notification_channel"];
+          notification_event_id: string | null;
+          sent_at: string;
+        };
+        Insert: {
+          user_id: string;
+          reminder_date: string;
+          channel?: Database["public"]["Enums"]["notification_channel"];
+          notification_event_id?: string | null;
+          sent_at?: string;
+        };
+        Update: {
+          user_id?: string;
+          reminder_date?: string;
+          channel?: Database["public"]["Enums"]["notification_channel"];
+          notification_event_id?: string | null;
+          sent_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "streak_reminder_log_notification_event_id_fkey";
+            columns: ["notification_event_id"];
+            isOneToOne: false;
+            referencedRelation: "notification_events";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       notification_events: {
         Row: {
           id: string;

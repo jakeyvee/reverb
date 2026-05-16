@@ -79,6 +79,9 @@ export type HomeUserMetrics = {
   // oldest day in the window; index HEATMAP_DAYS-1 is today.
   heatmap: boolean[];
   weeklyXp: number;
+  // VOL-135: tokens left in the user's current calendar month. The PRD
+  // grants one free-pass per month per user, so this is always 0 or 1.
+  freePassRemaining: number;
 };
 
 export type HomeMetrics = {
@@ -109,10 +112,23 @@ export function aggregateHomeMetrics(args: {
     lastPracticedOn: string | null;
   }>;
   events: ReadonlyArray<RawPracticeEvent>;
+  // VOL-135: per-user set of month_keys with a consumed free-pass. The
+  // aggregator translates "user has a row for the user's local month" into
+  // `freePassRemaining: 0` for that user.
+  freePassUses?: ReadonlyArray<{ userId: string; monthKey: string }>;
   currentUserId: string;
   now: Date;
 }): HomeMetrics {
   const streaksByUser = new Map(args.streaks.map((row) => [row.userId, row] as const));
+  const freePassByUser = new Map<string, Set<string>>();
+  for (const row of args.freePassUses ?? []) {
+    let set = freePassByUser.get(row.userId);
+    if (!set) {
+      set = new Set();
+      freePassByUser.set(row.userId, set);
+    }
+    set.add(row.monthKey);
+  }
 
   const users = args.members.map((member): HomeUserMetrics => {
     const streak = streaksByUser.get(member.userId);
@@ -136,6 +152,9 @@ export function aggregateHomeMetrics(args: {
       }
     }
 
+    const monthKey = localToday.slice(0, 7);
+    const consumedThisMonth = freePassByUser.get(member.userId)?.has(monthKey) ?? false;
+
     return {
       userId: member.userId,
       displayName: member.displayName,
@@ -147,6 +166,7 @@ export function aggregateHomeMetrics(args: {
       practicedToday: heatmap[heatmap.length - 1] || streak?.lastPracticedOn === localToday,
       heatmap,
       weeklyXp,
+      freePassRemaining: consumedThisMonth ? 0 : 1,
     };
   });
 
@@ -212,27 +232,35 @@ export async function loadHomeMetrics(
   // on their local "today".
   const windowStart = new Date(now.getTime() - 8 * 86_400_000).toISOString();
 
-  const [{ data: events, error: eventsError }, { data: streakRows, error: streaksError }] =
-    await Promise.all([
-      supabase
-        .from("practice_events")
-        .select(
-          "user_id, occurred_at, session_item:practice_session_items(kind)",
-        )
-        .in("user_id", userIds)
-        .eq("kind", "item_answered")
-        .gte("occurred_at", windowStart),
-      supabase
-        .from("streaks")
-        .select("user_id, current_length, longest_length, last_practiced_on")
-        .in("user_id", userIds),
-    ]);
+  const [
+    { data: events, error: eventsError },
+    { data: streakRows, error: streaksError },
+    { data: freePassRows, error: freePassError },
+  ] = await Promise.all([
+    supabase
+      .from("practice_events")
+      .select("user_id, occurred_at, session_item:practice_session_items(kind)")
+      .in("user_id", userIds)
+      .eq("kind", "item_answered")
+      .gte("occurred_at", windowStart),
+    supabase
+      .from("streaks")
+      .select("user_id, current_length, longest_length, last_practiced_on")
+      .in("user_id", userIds),
+    // Two months of free-pass rows so the home page reflects the current
+    // month accurately even at the very start/end of a UTC vs local-month
+    // boundary. The aggregator filters by the per-user local month_key.
+    supabase.from("streak_free_pass_uses").select("user_id, month_key").in("user_id", userIds),
+  ]);
 
   if (eventsError) {
     throw new Error(`Could not load practice events: ${eventsError.message}`);
   }
   if (streaksError) {
     throw new Error(`Could not load streaks: ${streaksError.message}`);
+  }
+  if (freePassError) {
+    throw new Error(`Could not load free-pass usage: ${freePassError.message}`);
   }
 
   const flatEvents: RawPracticeEvent[] = (events ?? []).map((row) => {
@@ -251,10 +279,16 @@ export async function loadHomeMetrics(
     lastPracticedOn: row.last_practiced_on,
   }));
 
+  const freePassUses = (freePassRows ?? []).map((row) => ({
+    userId: row.user_id,
+    monthKey: row.month_key,
+  }));
+
   return aggregateHomeMetrics({
     members,
     streaks,
     events: flatEvents,
+    freePassUses,
     currentUserId: args.currentUserId,
     now,
   });

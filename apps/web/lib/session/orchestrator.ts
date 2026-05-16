@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Tables, TablesInsert } from "@reverb/db/types";
 import { classifyCorrectionConfidence } from "@reverb/domain/schemas/correction-drill";
+import {
+  applyStreakOnSessionCompletion,
+  hasFreePassUseThisMonth,
+  readStreak as readStreakRow,
+} from "@/lib/streak/db";
+import { formatLocalDay, monthKeyFromLocalDate } from "@/lib/streak/pure";
 import { loadDueVocabReviewCards, type ReviewableVocabCard } from "./vocab-review";
 import type { CorrectionDrillView } from "./correction-drills";
 import { ensureCorrectionDrillsForUser } from "./correction-drills";
@@ -212,17 +218,13 @@ export async function startOrResumeTodaysSession(
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
       const { drills, grammarExercise, vocabCards, listening, shadowingClips } =
-        await loadCandidateQueue(
-        supabase,
-        userId,
-        {
+        await loadCandidateQueue(supabase, userId, {
           now,
           drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
           vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
           listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
           shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
-        },
-      );
+        });
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
         grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
@@ -249,17 +251,14 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, grammarExercise, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
-    supabase,
-    userId,
-    {
+  const { drills, grammarExercise, vocabCards, listening, shadowingClips } =
+    await loadCandidateQueue(supabase, userId, {
       now,
       drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
       vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
       listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
       shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
-    },
-  );
+    });
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
@@ -1064,6 +1063,12 @@ export type CompleteSessionResult = {
     longestLength: number;
     lastPracticedOn: string | null;
     bumped: boolean;
+    // Set on the completion that consumed the user's monthly free-pass
+    // token. The UI uses it to show the "we kept your streak alive" toast.
+    freePassApplied: { appliedForDate: string; monthKey: string } | null;
+    // Whether the user still has an unspent free-pass in the current
+    // calendar month after this update.
+    freePassRemaining: boolean;
   };
 };
 
@@ -1093,7 +1098,10 @@ export async function completeSession(
   }
 
   if (session.status === "completed") {
-    const streak = await readStreak(supabase, userId);
+    const streak = await readStreakSummary(supabase, userId);
+    const timezone = await resolveUserTimezone(supabase, userId);
+    const monthKey = monthKeyFromLocalDate(formatLocalDay(now, timezone));
+    const freePassUsed = await hasFreePassUseThisMonth(supabase, userId, monthKey);
     return {
       status: "already_completed",
       sessionId: session.id,
@@ -1101,7 +1109,12 @@ export async function completeSession(
       cardsReviewed: session.cards_reviewed,
       exercisesAttempted: session.exercises_attempted,
       durationMs: session.duration_ms ?? 0,
-      streak: { ...streak, bumped: false },
+      streak: {
+        ...streak,
+        bumped: false,
+        freePassApplied: null,
+        freePassRemaining: !freePassUsed,
+      },
     };
   }
 
@@ -1146,7 +1159,27 @@ export async function completeSession(
     },
   });
 
-  const streak = await bumpStreakForToday(supabase, userId, now);
+  const timezone = await resolveUserTimezone(supabase, userId);
+  const streakResult = await applyStreakOnSessionCompletion(supabase, {
+    userId,
+    timezone,
+    now,
+    sessionId: session.id,
+  });
+
+  if (streakResult.freePassApplied) {
+    await appendPracticeEvent(supabase, userId, {
+      session_id: session.id,
+      kind: "session_complete",
+      occurred_at: now.toISOString(),
+      payload: {
+        free_pass: {
+          applied_for_date: streakResult.freePassApplied.appliedForDate,
+          month_key: streakResult.freePassApplied.monthKey,
+        },
+      },
+    });
+  }
 
   return {
     status: session.cards_reviewed + session.exercises_attempted === 0 ? "no_items" : "completed",
@@ -1155,112 +1188,40 @@ export async function completeSession(
     cardsReviewed: session.cards_reviewed,
     exercisesAttempted: session.exercises_attempted,
     durationMs,
-    streak,
+    streak: {
+      currentLength: streakResult.currentLength,
+      longestLength: streakResult.longestLength,
+      lastPracticedOn: streakResult.lastPracticedOn,
+      bumped: streakResult.bumped,
+      freePassApplied: streakResult.freePassApplied,
+      freePassRemaining: streakResult.freePassRemaining,
+    },
   };
 }
 
-type StreakSnapshot = {
-  currentLength: number;
-  longestLength: number;
-  lastPracticedOn: string | null;
-};
-
-async function readStreak(
+async function resolveUserTimezone(
   supabase: SupabaseClient<Database>,
   userId: string,
-): Promise<StreakSnapshot> {
+): Promise<string> {
   const { data } = await supabase
-    .from("streaks")
-    .select("current_length, longest_length, last_practiced_on")
-    .eq("user_id", userId)
+    .from("profiles")
+    .select("timezone")
+    .eq("id", userId)
     .maybeSingle();
-  return {
-    currentLength: data?.current_length ?? 0,
-    longestLength: data?.longest_length ?? 0,
-    lastPracticedOn: data?.last_practiced_on ?? null,
-  };
+  return data?.timezone ?? "UTC";
 }
 
-// Bumps the streak row for "the user practised today". UTC date for now —
-// the streaks table carries a timezone column for a future per-user pass.
-// Idempotent: if the user already finished a session today, the streak
-// row is read but not advanced.
-async function bumpStreakForToday(
+// Read-only snapshot for the "already completed" branch. The full streak
+// update path lives in `@/lib/streak/db`.
+async function readStreakSummary(
   supabase: SupabaseClient<Database>,
   userId: string,
-  now: Date,
-): Promise<StreakSnapshot & { bumped: boolean }> {
-  const today = formatUtcDay(now);
-
-  const { data: existing } = await supabase
-    .from("streaks")
-    .select("current_length, longest_length, last_practiced_on")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (!existing) {
-    const { data: inserted, error } = await supabase
-      .from("streaks")
-      .upsert(
-        {
-          user_id: userId,
-          current_length: 1,
-          longest_length: 1,
-          last_practiced_on: today,
-        },
-        { onConflict: "user_id", ignoreDuplicates: false },
-      )
-      .select("current_length, longest_length, last_practiced_on")
-      .maybeSingle();
-    if (error) {
-      // Don't fail completion on a streak write — return the implied state.
-      return { currentLength: 1, longestLength: 1, lastPracticedOn: today, bumped: true };
-    }
-    return {
-      currentLength: inserted?.current_length ?? 1,
-      longestLength: inserted?.longest_length ?? 1,
-      lastPracticedOn: inserted?.last_practiced_on ?? today,
-      bumped: true,
-    };
-  }
-
-  if (existing.last_practiced_on === today) {
-    return {
-      currentLength: existing.current_length,
-      longestLength: existing.longest_length,
-      lastPracticedOn: existing.last_practiced_on,
-      bumped: false,
-    };
-  }
-
-  const yesterday = formatUtcDay(new Date(now.getTime() - 86_400_000));
-  const continued = existing.last_practiced_on === yesterday;
-  const nextLength = continued ? existing.current_length + 1 : 1;
-  const nextLongest = Math.max(existing.longest_length, nextLength);
-
-  const { data: bumped, error } = await supabase
-    .from("streaks")
-    .update({
-      current_length: nextLength,
-      longest_length: nextLongest,
-      last_practiced_on: today,
-    })
-    .eq("user_id", userId)
-    .select("current_length, longest_length, last_practiced_on")
-    .maybeSingle();
-  if (error) {
-    return {
-      currentLength: nextLength,
-      longestLength: nextLongest,
-      lastPracticedOn: today,
-      bumped: true,
-    };
-  }
+): Promise<{ currentLength: number; longestLength: number; lastPracticedOn: string | null }> {
+  const snapshot = await readStreakRow(supabase, userId);
   return {
-    currentLength: bumped?.current_length ?? nextLength,
-    longestLength: bumped?.longest_length ?? nextLongest,
-    lastPracticedOn: bumped?.last_practiced_on ?? today,
-    bumped: true,
+    currentLength: snapshot?.currentLength ?? 0,
+    longestLength: snapshot?.longestLength ?? 0,
+    lastPracticedOn: snapshot?.lastPracticedOn ?? null,
   };
 }
 
@@ -1274,8 +1235,4 @@ function endOfUtcDay(now: Date): Date {
   const d = startOfUtcDay(now);
   d.setUTCDate(d.getUTCDate() + 1);
   return d;
-}
-
-function formatUtcDay(now: Date): string {
-  return now.toISOString().slice(0, 10);
 }

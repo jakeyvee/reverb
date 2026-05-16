@@ -4,6 +4,10 @@ import { isAllowedEmail } from "@/lib/auth/allowlist";
 
 const PUBLIC_PATHS = new Set(["/sign-in", "/access-denied"]);
 const AUTH_PATH_PREFIX = "/auth/";
+// Cron handlers authenticate themselves with CRON_SECRET — running them
+// through the session refresh + allowlist gate would block Vercel Cron and
+// any external scheduler from ever calling them.
+const CRON_PATH_PREFIX = "/api/cron/";
 
 export async function middleware(request: NextRequest) {
   const state = await refreshSession(request);
@@ -14,8 +18,9 @@ export async function middleware(request: NextRequest) {
   // session state — gating them would break the very flow that establishes or
   // tears down the session.
   const isAuthRoute = pathname.startsWith(AUTH_PATH_PREFIX);
+  const isCronRoute = pathname.startsWith(CRON_PATH_PREFIX);
 
-  if (isAuthRoute) {
+  if (isAuthRoute || isCronRoute) {
     return state.getResponse();
   }
 

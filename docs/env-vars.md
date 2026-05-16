@@ -35,6 +35,7 @@ one, add it to the other.
 | `ALLOWED_EMAILS`                      | web                    | NO       | Vercel, `.env.local`                            | platform |
 | `VINCENT_UPLOAD_EMAIL`                | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | content  |
 | `HOUSEHOLD_TIMEZONE`                  | web, jobs              | NO       | Vercel, Trigger.dev, `.env.local`               | platform |
+| `CRON_SECRET`                         | web                    | NO       | Vercel, `.env.local`                            | platform |
 | `MEDIA_SILENCE_TRIM_ENABLED`          | jobs                   | NO       | Trigger.dev (optional)                          | platform |
 | `MEDIA_FFMPEG_PATH`                   | jobs (optional)        | NO       | Trigger.dev / `.env.local`                      | platform |
 | `MEDIA_FFPROBE_PATH`                  | jobs (optional)        | NO       | Trigger.dev / `.env.local`                      | platform |
@@ -78,6 +79,11 @@ one, add it to the other.
 - **`HOUSEHOLD_TIMEZONE`** — IANA name (e.g. `America/Los_Angeles`). Used by
   schedulers for daily rollovers; not browser-public to keep server time-zone
   logic authoritative.
+- **`CRON_SECRET`** — shared secret Vercel Cron attaches to its scheduled
+  invocations as `Authorization: Bearer …`. Used by the streak-reminder
+  cron route (`/api/cron/streak-reminders`) to authenticate requests. Leave
+  unset in local dev to allow direct curl access; production deploys MUST
+  set it so the route is not publicly callable.
 - **`MEDIA_SILENCE_TRIM_ENABLED`** — opt-in flag for the silence-trim cost
   optimisation in the lesson pipeline. Off by default because `silenceremove`
   is brittle on lossy inputs (see `packages/media/src/silence.ts` for the

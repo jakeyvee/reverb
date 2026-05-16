@@ -112,9 +112,7 @@ describe("aggregateHomeMetrics", () => {
     expect(first?.currentStreak).toBe(4);
     expect(first?.practicedToday).toBe(true);
     expect(first?.heatmap.at(-1)).toBe(true);
-    expect(first?.weeklyXp).toBe(
-      HOME_XP_WEIGHTS.vocab_review + HOME_XP_WEIGHTS.correction_drill,
-    );
+    expect(first?.weeklyXp).toBe(HOME_XP_WEIGHTS.vocab_review + HOME_XP_WEIGHTS.correction_drill);
 
     expect(second?.userId).toBe("user-b");
     expect(second?.practicedToday).toBe(false);
@@ -145,9 +143,7 @@ describe("aggregateHomeMetrics", () => {
     const metrics = aggregateHomeMetrics({
       members: baseMembers,
       streaks: [],
-      events: [
-        { userId: "user-a", occurredAt: now.toISOString(), sessionItemKind: null },
-      ],
+      events: [{ userId: "user-a", occurredAt: now.toISOString(), sessionItemKind: null }],
       currentUserId: "user-a",
       now,
     });
@@ -155,6 +151,23 @@ describe("aggregateHomeMetrics", () => {
     // something), but XP isn't awarded because we can't price the item.
     expect(metrics.users[0]?.heatmap.at(-1)).toBe(true);
     expect(metrics.users[0]?.weeklyXp).toBe(0);
+  });
+
+  it("subtracts the free-pass token when one was consumed in the local month", () => {
+    const now = new Date("2026-05-16T05:00:00Z");
+    const monthKey = "2026-05";
+    const metrics = aggregateHomeMetrics({
+      members: baseMembers,
+      streaks: [],
+      events: [],
+      freePassUses: [{ userId: "user-a", monthKey }],
+      currentUserId: "user-a",
+      now,
+    });
+    const alex = metrics.users.find((u) => u.userId === "user-a");
+    const bo = metrics.users.find((u) => u.userId === "user-b");
+    expect(alex?.freePassRemaining).toBe(0);
+    expect(bo?.freePassRemaining).toBe(1);
   });
 
   it("treats lastPracticedOn-as-today as practiced even with no events in window", () => {
@@ -166,9 +179,7 @@ describe("aggregateHomeMetrics", () => {
     const today = formatLocalDay(now, "Asia/Singapore");
     const metrics = aggregateHomeMetrics({
       members: baseMembers,
-      streaks: [
-        { userId: "user-a", currentLength: 1, longestLength: 1, lastPracticedOn: today },
-      ],
+      streaks: [{ userId: "user-a", currentLength: 1, longestLength: 1, lastPracticedOn: today }],
       events: [],
       currentUserId: "user-a",
       now,
@@ -276,9 +287,7 @@ describe("buildPartnerNudge", () => {
     if (!soloMember) throw new Error("baseMembers missing fixture");
     const metrics = aggregateHomeMetrics({
       members: [soloMember],
-      streaks: [
-        { userId: "user-a", currentLength: 1, longestLength: 1, lastPracticedOn: today },
-      ],
+      streaks: [{ userId: "user-a", currentLength: 1, longestLength: 1, lastPracticedOn: today }],
       events: [],
       currentUserId: "user-a",
       now,

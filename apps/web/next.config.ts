@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  transpilePackages: ["@reverb/ai", "@reverb/db", "@reverb/domain", "@reverb/srs"],
+  transpilePackages: ["@reverb/ai", "@reverb/db", "@reverb/domain", "@reverb/email", "@reverb/srs"],
   typedRoutes: true,
   // Workspace packages are authored as Node-ESM and use `.js` extensions in
   // their internal imports (e.g. `export * from "./fsrs.js"`). The webpack

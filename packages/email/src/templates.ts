@@ -70,6 +70,70 @@ export function renderLessonReadyEmail(input: LessonReadyTemplateInput): Rendere
   return { subject, html, text };
 }
 
+export type StreakReminderTemplateInput = {
+  /** Display name used in the greeting. */
+  displayName: string;
+  /** User's current streak length (in days). Zero is allowed. */
+  currentStreak: number;
+  /**
+   * Free-pass remaining for the calendar month. The reminder mentions the
+   * token so the recipient knows they have an out — purely informational.
+   */
+  freePassRemaining: boolean;
+};
+
+// Plain text + HTML reminder. Mirrors the lesson-email shape: no external
+// CSS, no images, ASCII-safe text version. Keeping subject lines short so
+// the streak number doesn't get clipped in inbox previews.
+export function renderStreakReminderEmail(input: StreakReminderTemplateInput): RenderedEmail {
+  const appUrl = emailEnv.appUrl();
+  const practiceUrl = `${appUrl}/session`;
+  const safeName = escapeHtml(input.displayName);
+  const streakLine =
+    input.currentStreak > 0
+      ? `You're on a <strong>${input.currentStreak}-day</strong> streak. A short session keeps it alive.`
+      : `Start the day with a quick session and put a streak on the board.`;
+  const freePassLine = input.freePassRemaining
+    ? `<p style="color: #555; font-size: 12px;">Heads up: you still have this month's free-pass, so a missed day won't reset the streak — but practising today is better.</p>`
+    : "";
+  const subject =
+    input.currentStreak > 0
+      ? `Keep your ${input.currentStreak}-day streak alive`
+      : `Time for today's Reverb practice`;
+
+  const html = `<!doctype html>
+<html>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111; line-height: 1.5;">
+    <p>Hi ${safeName},</p>
+    <p>${streakLine}</p>
+    <p>
+      <a href="${practiceUrl}" style="display: inline-block; background: #111; color: #fff; padding: 10px 16px; border-radius: 6px; text-decoration: none;">Start practice</a>
+    </p>
+    ${freePassLine}
+    <p style="color: #555; font-size: 12px;">— Reverb</p>
+  </body>
+</html>`;
+
+  const streakTextLine =
+    input.currentStreak > 0
+      ? `You're on a ${input.currentStreak}-day streak. A short session keeps it alive.`
+      : `Start the day with a quick session and put a streak on the board.`;
+  const freePassTextLine = input.freePassRemaining
+    ? `Heads up: you still have this month's free-pass, so a missed day won't reset the streak — but practising today is better.`
+    : null;
+  const text = [
+    `Hi ${input.displayName},`,
+    streakTextLine,
+    ``,
+    `Start practice: ${practiceUrl}`,
+    freePassTextLine,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+
+  return { subject, html, text };
+}
+
 export function renderLessonFailedEmail(input: LessonFailedTemplateInput): RenderedEmail {
   const appUrl = emailEnv.appUrl();
   const lessonUrl = `${appUrl}/lessons/${input.lessonId}`;

@@ -10,6 +10,8 @@
       "@reverb/db/*": ["../../packages/db/src/*"],
       "@reverb/domain": ["../../packages/domain/src/index.ts"],
       "@reverb/domain/*": ["../../packages/domain/src/*"],
+      "@reverb/email": ["../../packages/email/src/index.ts"],
+      "@reverb/email/*": ["../../packages/email/src/*"],
       "@reverb/srs": ["../../packages/srs/src/index.ts"],
       "@reverb/srs/*": ["../../packages/srs/src/*"]
     }
