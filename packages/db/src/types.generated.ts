@@ -1309,6 +1309,146 @@ export type Database = {
           },
         ];
       };
+      chat_sessions: {
+        Row: {
+          id: string;
+          user_id: string;
+          level: string;
+          status: string;
+          summary: string | null;
+          total_messages: number;
+          total_user_messages: number;
+          last_message_at: string | null;
+          ended_at: string | null;
+          metadata: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          level?: string;
+          status?: string;
+          summary?: string | null;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          ended_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          level?: string;
+          status?: string;
+          summary?: string | null;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          ended_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      chat_messages: {
+        Row: {
+          id: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
+          user_id?: string;
+          role?: Database["public"]["Enums"]["chat_message_role"];
+          content?: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "chat_messages_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      chat_corrections: {
+        Row: {
+          id: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          message_id?: string;
+          session_id?: string;
+          user_id?: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text?: string;
+          corrected_text?: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "chat_corrections_message_id_fkey";
+            columns: ["message_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_messages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "chat_corrections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -1317,6 +1457,14 @@ export type Database = {
       current_household_id: {
         Args: Record<PropertyKey, never>;
         Returns: string;
+      };
+      bump_chat_session_counters: {
+        Args: {
+          p_session_id: string;
+          p_message_increment?: number;
+          p_user_message_increment?: number;
+        };
+        Returns: undefined;
       };
     };
     Enums: {
@@ -1362,6 +1510,8 @@ export type Database = {
       notification_status: "queued" | "sent" | "failed" | "cancelled";
       correction_drill_state: "new" | "learning" | "retired";
       correction_drill_result: "pass" | "fail";
+      chat_message_role: "user" | "assistant";
+      chat_correction_kind: "grammar" | "vocabulary" | "pronunciation" | "usage";
     };
     CompositeTypes: {
       [_ in never]: never;
