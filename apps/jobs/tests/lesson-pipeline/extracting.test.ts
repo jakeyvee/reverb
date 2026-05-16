@@ -1,9 +1,12 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
-import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { type Tables } from "@reverb/db/types";
 import type { InferExtractionInput } from "@reverb/ai";
 import { SCHEMA_VERSIONS, type ExtractionOutput } from "@reverb/domain";
 import { LESSON_AUDIO_BUCKET } from "@reverb/domain/schemas/upload";
+import type { Runner } from "@reverb/media";
 import { runLessonPipeline } from "../../src/lesson-pipeline/orchestrator.js";
 import { type PipelineServices } from "../../src/lesson-pipeline/services.js";
 import { type ServiceClient } from "../../src/lesson-pipeline/state.js";
@@ -95,6 +98,28 @@ function seed(supabase: FakeSupabase) {
   supabase.insertLesson(buildLesson());
   supabase.insertProfile(buildProfile(USER_A));
   supabase.insertProfile(buildProfile(USER_B));
+  // Seed a downloadable source body so the generating_audio step can pull the
+  // file into a tmp dir without needing a real Supabase storage backend.
+  const file = buildFile();
+  supabase.storageObjects.set(
+    `${file.storage_bucket}:${file.storage_path}`,
+    Buffer.from("FAKE-SOURCE-AUDIO"),
+  );
+}
+
+// Fake ffmpeg/ffprobe runner used by clip materialization. ffprobe returns a
+// duration string; ffmpeg writes an opaque payload to the requested output.
+function makeMediaRunner(probeSeconds: number): Runner {
+  return vi.fn(async (_cmd: string, args: readonly string[]) => {
+    const argList = args as readonly string[];
+    if (argList.includes("-show_entries") || argList.includes("-print_format")) {
+      return { code: 0, stdout: `${probeSeconds.toFixed(3)}\n`, stderr: "" };
+    }
+    const outputPath = argList[argList.length - 1]!;
+    await mkdir(path.dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, Buffer.from("CLIP-BYTES"));
+    return { code: 0, stdout: "", stderr: "" };
+  }) as unknown as Runner;
 }
 
 function asClient(supabase: FakeSupabase): ServiceClient {
@@ -260,6 +285,14 @@ function buildSteps(): {
         model: "test-extract-model",
         promptVersion: "extract-v1",
       };
+    },
+    // The dialogue clip the extraction emits sits inside the seeded lesson
+    // duration (3s), so materialization actually runs — provide a fake ffmpeg
+    // runner so the step does not try to spawn a real binary.
+    mediaTools: {
+      ffmpegPath: "/fake/ffmpeg",
+      ffprobePath: "/fake/ffprobe",
+      runner: makeMediaRunner(3),
     },
     synthesize: async (input) => Buffer.from(`audio:${input.text}`, "utf8"),
     emailer: {

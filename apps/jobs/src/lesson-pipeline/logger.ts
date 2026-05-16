@@ -4,10 +4,12 @@
 // runtime to exercise the orchestrator.
 export type PipelineLogger = {
   info(message: string, fields?: Record<string, unknown>): void;
+  warn(message: string, fields?: Record<string, unknown>): void;
   error(message: string, fields?: Record<string, unknown>): void;
 };
 
 export const noopLogger: PipelineLogger = {
   info: () => {},
+  warn: () => {},
   error: () => {},
 };

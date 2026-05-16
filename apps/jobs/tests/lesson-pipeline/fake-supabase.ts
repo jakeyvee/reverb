@@ -5,6 +5,7 @@
 // Keeping the fake in tests/ rather than dressing it up as a full mock keeps
 // it obvious which paths are exercised. If a future code change reaches for a
 // new method, the fake will throw at test time and we'll add it explicitly.
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import type { Tables } from "@reverb/db/types";
 
@@ -62,11 +63,17 @@ export class FakeSupabase {
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
-  // Captures the (bucket, path, byteSize, contentType, upsert) tuples for
-  // every uploaded object so TTS tests can assert what landed where.
+  // Object body served by `storage.from(bucket).download(path)` calls. When a
+  // test stages a download (e.g. for clip materialization), it preloads bytes
+  // here keyed by `${bucket}:${path}`. Unknown keys return a 404-shaped error.
+  storageObjects: Map<string, Buffer> = new Map();
+  // Captures the (bucket, path, bytes, byteSize, contentType, upsert) tuples
+  // for every uploaded object. `bytes` is used by clip-materialization tests;
+  // `byteSize` is used by TTS tests.
   storageUploads: Array<{
     bucket: string;
     path: string;
+    bytes: Buffer;
     byteSize: number;
     contentType: string | undefined;
     upsert: boolean | undefined;
@@ -119,6 +126,20 @@ export class FakeSupabase {
         this.signedUrlRequests.push({ bucket, path, ttl });
         return { data: { signedUrl: `https://fake/${bucket}/${path}?ttl=${ttl}` }, error: null };
       },
+      download: async (path: string) => {
+        const key = `${bucket}:${path}`;
+        const body = this.storageObjects.get(key);
+        if (!body) {
+          return { data: null, error: { message: `object not found: ${key}` } };
+        }
+        return {
+          data: {
+            arrayBuffer: async () =>
+              body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+          },
+          error: null,
+        };
+      },
       upload: async (
         path: string,
         body: Buffer | Uint8Array | Blob | ArrayBuffer,
@@ -131,15 +152,22 @@ export class FakeSupabase {
           this.failNextUpload = null;
           return { data: null, error: { message: "simulated upload failure" } };
         }
-        const byteSize = byteLength(body);
+        const buffer = Buffer.isBuffer(body)
+          ? body
+          : body instanceof Uint8Array
+            ? Buffer.from(body)
+            : body instanceof ArrayBuffer
+              ? Buffer.from(body)
+              : Buffer.alloc(0);
         this.storageUploads.push({
           bucket,
           path,
-          byteSize,
+          bytes: buffer,
+          byteSize: byteLength(body),
           contentType: opts?.contentType,
           upsert: opts?.upsert,
         });
-        return { data: { path }, error: null };
+        return { data: { id: path, path, fullPath: `${bucket}/${path}` }, error: null };
       },
     }),
   };

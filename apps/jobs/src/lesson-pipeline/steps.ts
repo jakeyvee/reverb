@@ -20,6 +20,7 @@ import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
 import type { PipelineLogger } from "./logger.js";
 import type { PipelineServices } from "./services.js";
+import { materializeDialogueClips } from "./clip-generation.js";
 import { WORKER_STAGES, type WorkerStage } from "./types.js";
 
 // Each stage handler is the seam where the real provider integration lives.
@@ -1194,12 +1195,22 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
   };
 }
 
-async function generatingAudioStep({
-  supabase,
-  services,
-  logger,
-  job,
-}: StepContext): Promise<StepResult> {
+async function generatingAudioStep(ctx: StepContext): Promise<StepResult> {
+  const { supabase, source, services, logger, job } = ctx;
+  // The `generating_audio` stage now has two concerns:
+  // 1. VOL-126 — materialise dialogue clips extracted from the source recording.
+  //    The extracting stage records clip storage paths; we cut the real audio
+  //    objects here.
+  // 2. VOL-118 — synthesise per-card Indonesian TTS for newly extracted vocab
+  //    and cache it on the vocab_items rows.
+  const clipResult = await materializeDialogueClips({
+    supabase,
+    lessonId: job.lesson_id,
+    source,
+    logger,
+    mediaTools: services.mediaTools,
+  });
+
   const lesson = await loadLessonForExtraction(supabase, job.lesson_id);
   const summary = await generateVocabAudioForLesson({
     supabase,
@@ -1222,6 +1233,10 @@ async function generatingAudioStep({
 
   return {
     details: {
+      dialogue_clip_total: clipResult.totalCount,
+      dialogue_clip_materialized: clipResult.materializedCount,
+      dialogue_clip_skipped: clipResult.skippedCount,
+      dialogue_clip_skips: clipResult.skipped,
       provider: GOOGLE_TTS_PROVIDER_ID,
       voice: DEFAULT_INDONESIAN_VOICE,
       language_code: INDONESIAN_LANGUAGE_CODE,
