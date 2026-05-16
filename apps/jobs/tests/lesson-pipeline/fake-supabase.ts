@@ -266,9 +266,15 @@ type Op =
   | { kind: "insert"; rows: AnyRow[] }
   | { kind: "upsert"; rows: AnyRow[]; onConflict: string[]; ignoreDuplicates: boolean };
 
+function matchesIlike(value: string, pattern: string): boolean {
+  const literal = pattern.replace(/\\([\\%_])/g, "$1");
+  return value.toLocaleLowerCase() === literal.toLocaleLowerCase();
+}
+
 class RowsQuery<TRow extends object> {
   private filters: Filter[] = [];
   private inFilters: Array<{ col: string; values: unknown[] }> = [];
+  private ilikeFilters: Array<{ col: string; pattern: string }> = [];
   private ordering: { col: string; ascending: boolean } | null = null;
   private rowLimit: number | null = null;
   private op: Op = { kind: "select" };
@@ -288,6 +294,10 @@ class RowsQuery<TRow extends object> {
   }
   in(col: string, values: unknown[]) {
     this.inFilters.push({ col, values });
+    return this;
+  }
+  ilike(col: string, pattern: string) {
+    this.ilikeFilters.push({ col, pattern });
     return this;
   }
   order(col: string, opts: { ascending: boolean }) {
@@ -360,6 +370,9 @@ class RowsQuery<TRow extends object> {
   private matchesFilters(row: AnyRow): boolean {
     for (const f of this.filters) if (row[f.col] !== f.value) return false;
     for (const f of this.inFilters) if (!f.values.includes(row[f.col])) return false;
+    for (const f of this.ilikeFilters) {
+      if (!matchesIlike(String(row[f.col] ?? ""), f.pattern)) return false;
+    }
     return true;
   }
 
