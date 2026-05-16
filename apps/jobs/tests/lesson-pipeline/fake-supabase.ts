@@ -21,6 +21,9 @@ type GrammarPatternRow = Tables<"grammar_patterns">;
 type DialogueClipRow = Tables<"dialogue_clips">;
 type TeacherCorrectionRow = Tables<"teacher_corrections">;
 type ExtractionRunRow = Tables<"extraction_runs">;
+type CardRow = Tables<"cards">;
+type KnownWordRow = Tables<"user_known_words">;
+type TtsAssetRow = Tables<"tts_assets">;
 
 type Filter = { col: string; value: unknown };
 type AnyRow = Record<string, unknown>;
@@ -36,7 +39,10 @@ type TableName =
   | "grammar_patterns"
   | "dialogue_clips"
   | "teacher_corrections"
-  | "extraction_runs";
+  | "extraction_runs"
+  | "cards"
+  | "user_known_words"
+  | "tts_assets";
 
 export class FakeSupabase {
   jobs: JobRow[] = [];
@@ -51,6 +57,9 @@ export class FakeSupabase {
   dialogueClips: DialogueClipRow[] = [];
   teacherCorrections: TeacherCorrectionRow[] = [];
   extractionRuns: ExtractionRunRow[] = [];
+  cards: CardRow[] = [];
+  knownWords: KnownWordRow[] = [];
+  ttsAssets: TtsAssetRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
@@ -58,14 +67,19 @@ export class FakeSupabase {
   // test stages a download (e.g. for clip materialization), it preloads bytes
   // here keyed by `${bucket}:${path}`. Unknown keys return a 404-shaped error.
   storageObjects: Map<string, Buffer> = new Map();
-  // Records every upload the worker pushes through `storage.from(b).upload(p, …)`.
+  // Captures the (bucket, path, bytes, byteSize, contentType, upsert) tuples
+  // for every uploaded object. `bytes` is used by clip-materialization tests;
+  // `byteSize` is used by TTS tests.
   storageUploads: Array<{
     bucket: string;
     path: string;
     bytes: Buffer;
-    contentType?: string;
-    upsert?: boolean;
+    byteSize: number;
+    contentType: string | undefined;
+    upsert: boolean | undefined;
   }> = [];
+  // Toggleable upload failure, used to model a transient storage 503.
+  failNextUpload: { bucket?: string } | null = null;
   // Toggle to simulate a step failure on the n-th update to the jobs table.
   failOnNextUpdate: { whenStatus?: string; count?: number } | null = null;
 
@@ -95,6 +109,12 @@ export class FakeSupabase {
         return new RowsQuery(this, table, this.teacherCorrections);
       case "extraction_runs":
         return new RowsQuery(this, table, this.extractionRuns);
+      case "cards":
+        return new RowsQuery(this, table, this.cards);
+      case "user_known_words":
+        return new RowsQuery(this, table, this.knownWords);
+      case "tts_assets":
+        return new RowsQuery(this, table, this.ttsAssets);
       default:
         throw new Error(`FakeSupabase: unsupported table ${table}`);
     }
@@ -122,14 +142,28 @@ export class FakeSupabase {
       },
       upload: async (
         path: string,
-        body: ArrayBufferView | ArrayBuffer | Buffer,
+        body: Buffer | Uint8Array | Blob | ArrayBuffer,
         opts?: { contentType?: string; upsert?: boolean },
       ) => {
-        const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body as ArrayBuffer);
+        if (
+          this.failNextUpload &&
+          (!this.failNextUpload.bucket || this.failNextUpload.bucket === bucket)
+        ) {
+          this.failNextUpload = null;
+          return { data: null, error: { message: "simulated upload failure" } };
+        }
+        const buffer = Buffer.isBuffer(body)
+          ? body
+          : body instanceof Uint8Array
+            ? Buffer.from(body)
+            : body instanceof ArrayBuffer
+              ? Buffer.from(body)
+              : Buffer.alloc(0);
         this.storageUploads.push({
           bucket,
           path,
           bytes: buffer,
+          byteSize: byteLength(body),
           contentType: opts?.contentType,
           upsert: opts?.upsert,
         });
@@ -149,6 +183,15 @@ export class FakeSupabase {
   }
   insertProfile(row: ProfileRow): void {
     this.profiles.push({ ...row });
+  }
+  insertVocabItem(row: VocabRow): void {
+    this.vocabItems.push({ ...row });
+  }
+  insertKnownWord(row: KnownWordRow): void {
+    this.knownWords.push({ ...row });
+  }
+  insertTtsAsset(row: TtsAssetRow): void {
+    this.ttsAssets.push({ ...row });
   }
   job(): JobRow {
     const job = this.jobs[0];
@@ -236,13 +279,59 @@ export class FakeSupabase {
         ...row,
       };
     }
+    if (table === "cards") {
+      return {
+        id: row.id ?? randomUUID(),
+        state: "new",
+        due_at: now,
+        stability: 0,
+        difficulty: 0,
+        reps: 0,
+        lapses: 0,
+        scheduled_days: 0,
+        elapsed_days: 0,
+        last_reviewed_at: null,
+        metadata: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
+    if (table === "user_known_words") {
+      return {
+        source: "self_report",
+        marked_at: now,
+        ...row,
+      };
+    }
+    if (table === "tts_assets") {
+      return {
+        id: row.id ?? randomUUID(),
+        byte_size: null,
+        metadata: {},
+        created_at: now,
+        ...row,
+      };
+    }
     return { ...row };
   }
 
   afterDelete(table: TableName, removed: AnyRow[]): void {
-    if (table !== "transcript_segments") return;
-    const removedIds = new Set(removed.map((row) => row.id));
-    this.transcriptWords = this.transcriptWords.filter((word) => !removedIds.has(word.segment_id));
+    if (table === "transcript_segments") {
+      const removedIds = new Set(removed.map((row) => row.id));
+      this.transcriptWords = this.transcriptWords.filter(
+        (word) => !removedIds.has(word.segment_id),
+      );
+      return;
+    }
+    if (table === "vocab_items") {
+      // Mirror the FK cascade so tests that delete vocab_items also see cards
+      // and user_known_words drop. The real schema uses
+      // `on delete cascade` for both.
+      const removedIds = new Set(removed.map((row) => row.id));
+      this.cards = this.cards.filter((card) => !removedIds.has(card.vocab_item_id));
+      this.knownWords = this.knownWords.filter((entry) => !removedIds.has(entry.vocab_item_id));
+    }
   }
 }
 
@@ -253,9 +342,23 @@ type Op =
   | { kind: "insert"; rows: AnyRow[] }
   | { kind: "upsert"; rows: AnyRow[]; onConflict: string[]; ignoreDuplicates: boolean };
 
+function matchesIlike(value: string, pattern: string): boolean {
+  const literal = pattern.replace(/\\([\\%_])/g, "$1");
+  return value.toLocaleLowerCase() === literal.toLocaleLowerCase();
+}
+
+function byteLength(body: Buffer | Uint8Array | Blob | ArrayBuffer): number {
+  if (body instanceof Buffer) return body.byteLength;
+  if (body instanceof Uint8Array) return body.byteLength;
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (typeof Blob !== "undefined" && body instanceof Blob) return body.size;
+  return 0;
+}
+
 class RowsQuery<TRow extends object> {
   private filters: Filter[] = [];
   private inFilters: Array<{ col: string; values: unknown[] }> = [];
+  private ilikeFilters: Array<{ col: string; pattern: string }> = [];
   private ordering: { col: string; ascending: boolean } | null = null;
   private rowLimit: number | null = null;
   private op: Op = { kind: "select" };
@@ -275,6 +378,10 @@ class RowsQuery<TRow extends object> {
   }
   in(col: string, values: unknown[]) {
     this.inFilters.push({ col, values });
+    return this;
+  }
+  ilike(col: string, pattern: string) {
+    this.ilikeFilters.push({ col, pattern });
     return this;
   }
   order(col: string, opts: { ascending: boolean }) {
@@ -347,6 +454,9 @@ class RowsQuery<TRow extends object> {
   private matchesFilters(row: AnyRow): boolean {
     for (const f of this.filters) if (row[f.col] !== f.value) return false;
     for (const f of this.inFilters) if (!f.values.includes(row[f.col])) return false;
+    for (const f of this.ilikeFilters) {
+      if (!matchesIlike(String(row[f.col] ?? ""), f.pattern)) return false;
+    }
     return true;
   }
 

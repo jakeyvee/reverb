@@ -4,25 +4,25 @@
 import {
   inferDiarizationWithAnthropic,
   inferExtractionWithAnthropic,
+  synthesizeSpeech,
   transcribeAudioWithGroq,
   type InferDiarizationInput,
   type InferDiarizationResult,
   type InferExtractionInput,
   type InferExtractionResult,
+  type SynthesizeInput,
   type TranscribeAudioInput,
   type TranscribeAudioResult,
 } from "@reverb/ai";
 import { defaultLessonEmailer, type LessonEmailer } from "@reverb/email";
 import type { MediaToolOptions } from "./media.js";
-import type {
-  EmailRecipientResolver,
-  VincentEmailResolver,
-} from "./notifications.js";
+import type { EmailRecipientResolver, VincentEmailResolver } from "./notifications.js";
 import type { ServiceClient } from "./state.js";
 
 export type Transcriber = (input: TranscribeAudioInput) => Promise<TranscribeAudioResult>;
 export type Diarizer = (input: InferDiarizationInput) => Promise<InferDiarizationResult>;
 export type Extractor = (input: InferExtractionInput) => Promise<InferExtractionResult>;
+export type Synthesizer = (input: SynthesizeInput) => Promise<Buffer>;
 
 export type PipelineServices = {
   transcribe: Transcriber;
@@ -33,6 +33,10 @@ export type PipelineServices = {
   // binary); tests inject a fake runner so the orchestrator can be exercised
   // without spawning a real ffmpeg.
   mediaTools?: MediaToolOptions;
+  // Google TTS synthesiser for the `generating_audio` stage. Tests inject a
+  // capturing stub so they can assert request mapping and cache behaviour
+  // without hitting Google.
+  synthesize: Synthesizer;
   // Send the lesson_ready / lesson_failed emails through Resend (production)
   // or a capturing stub (tests).
   emailer: LessonEmailer;
@@ -51,9 +55,7 @@ export type PipelineServices = {
 // `null` return so the orchestrator can log and skip rather than crash the
 // pipeline mid-finalisation — per VOL-125's "email failures must not roll
 // back lesson processing" acceptance criterion.
-export function createAuthAdminRecipientResolver(
-  supabase: ServiceClient,
-): EmailRecipientResolver {
+export function createAuthAdminRecipientResolver(supabase: ServiceClient): EmailRecipientResolver {
   return async (userId) => {
     try {
       const { data, error } = await supabase.auth.admin.getUserById(userId);
@@ -78,6 +80,7 @@ export function defaultPipelineServices(supabase: ServiceClient): PipelineServic
     transcribe: transcribeAudioWithGroq,
     diarize: inferDiarizationWithAnthropic,
     extract: inferExtractionWithAnthropic,
+    synthesize: synthesizeSpeech,
     emailer: defaultLessonEmailer(),
     resolveRecipientEmail: createAuthAdminRecipientResolver(supabase),
     resolveVincentEmail: defaultVincentEmailResolver(),
