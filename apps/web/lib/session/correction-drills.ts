@@ -89,7 +89,13 @@ export async function ensureCorrectionDrillsForUser(
     user_id: userId,
     teacher_correction_id: row.id,
   }));
-  const { error: insertError } = await supabase.from("correction_drills").insert(rows);
+  // Use upsert + ignoreDuplicates so concurrent session page loads (refresh,
+  // second tab, Next prefetch + click) don't trip the
+  // (user_id, teacher_correction_id) unique constraint and 500 the page.
+  // Mirrors the household bootstrap pattern in apps/web/lib/auth/bootstrap.ts.
+  const { error: insertError } = await supabase
+    .from("correction_drills")
+    .upsert(rows, { onConflict: "user_id,teacher_correction_id", ignoreDuplicates: true });
   if (insertError) {
     throw new Error(`Could not insert correction_drills: ${insertError.message}`);
   }
@@ -228,12 +234,13 @@ async function loadFreshVocabPreview(
   const out: VocabPreview[] = [];
   for (const vocab of vocabRows) {
     const card = cardByVocab.get(vocab.id);
+    if (card) continue;
     out.push({
       vocabItemId: vocab.id,
-      cardId: card?.id ?? null,
+      cardId: null,
       lemma: vocab.lemma,
       translation: vocab.translation,
-      dueAt: card?.due_at ?? null,
+      dueAt: null,
     });
     if (out.length >= limit) break;
   }

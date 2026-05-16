@@ -25,7 +25,7 @@ export const CORRECTION_DRILL_HIGH_CONFIDENCE = 0.7;
 // state can be re-projected without code-spread.
 export const CORRECTION_DRILL_RETIRE_AFTER_CONSECUTIVE_PASSES = 3;
 export const CORRECTION_DRILL_FAIL_INTERVAL_MINUTES = 5;
-export const CORRECTION_DRILL_PASS_INTERVAL_DAYS = [1, 3, 7] as const;
+export const CORRECTION_DRILL_PASS_INTERVAL_DAYS = [1, 3] as const;
 
 // Awarded on a successful drill attempt. Fail awards 0.
 export const CORRECTION_DRILL_XP_PER_PASS = 10;
