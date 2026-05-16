@@ -553,6 +553,74 @@ describe("runLessonPipeline extraction integration", () => {
     }
   });
 
+  it("reuses mixed-case stored lemmas when a later extraction normalizes them", async () => {
+    const supabase = new FakeSupabase();
+    seed(supabase);
+    const { steps, services } = buildSteps();
+
+    services.extract = async (input) => {
+      const extraction: ExtractionOutput = {
+        schemaVersion: SCHEMA_VERSIONS.extractionOutput,
+        promptVersion: "extract-v1",
+        language: input.language,
+        sourceTranscriptId: input.sourceTranscriptId,
+        new_vocab: [
+          {
+            term: "iphone",
+            language: "id",
+            gloss: "iPhone",
+            sourceSegmentIds: ["S0"],
+          },
+        ],
+        grammar_patterns: [],
+        dialogue_clips: [],
+        teacher_corrections: [],
+      };
+      return {
+        extraction,
+        rawResponse: JSON.stringify(extraction),
+        model: "test-extract-model",
+        promptVersion: "extract-v1",
+      };
+    };
+
+    const existingVocabId = "vocab-existing-iphone";
+    supabase.insertVocabItem({
+      id: existingVocabId,
+      household_id: HOUSEHOLD_ID,
+      lesson_id: "99999999-9999-9999-9999-999999999997",
+      lemma: "iPhone",
+      reading: null,
+      translation: "iPhone",
+      part_of_speech: null,
+      example_sentence: "Original example.",
+      example_translation: "Original gloss.",
+      audio_storage_bucket: null,
+      audio_storage_path: null,
+      difficulty: null,
+      metadata: {},
+      created_at: new Date(0).toISOString(),
+      updated_at: new Date(0).toISOString(),
+    });
+
+    await runLessonPipeline({
+      supabase: asClient(supabase),
+      payload: { lessonId: LESSON_ID },
+      triggerRunId: "run_mixed_case",
+      logger: noopLogger,
+      steps,
+      services,
+    });
+
+    expect(supabase.vocabItems).toHaveLength(1);
+    expect(supabase.vocabItems[0]!.id).toBe(existingVocabId);
+    expect(supabase.cards).toHaveLength(2);
+    expect(supabase.cards.map((card) => card.vocab_item_id)).toEqual([
+      existingVocabId,
+      existingVocabId,
+    ]);
+  });
+
   it("is idempotent across extraction retries — re-running does not duplicate cards", async () => {
     const supabase = new FakeSupabase();
     seed(supabase);
