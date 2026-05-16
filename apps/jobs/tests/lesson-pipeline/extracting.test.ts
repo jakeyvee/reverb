@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import { type Tables } from "@reverb/db/types";
 import type { InferExtractionInput } from "@reverb/ai";
@@ -159,24 +160,33 @@ function buildSteps(): {
   };
 
   const diarizingStep: StepHandler = async ({ supabase, job }) => {
-    await (supabase as unknown as FakeSupabase).from("transcript_segments").update({
-      speaker: "student_vincent",
-      speaker_confidence: 0.94,
-      speaker_notes: null,
-      speaker_low_priority: false,
-    }).eq("id", `seg-${job.lesson_id}-0`);
-    await (supabase as unknown as FakeSupabase).from("transcript_segments").update({
-      speaker: "teacher",
-      speaker_confidence: 0.88,
-      speaker_notes: "English explanation",
-      speaker_low_priority: true,
-    }).eq("id", `seg-${job.lesson_id}-1`);
-    await (supabase as unknown as FakeSupabase).from("transcript_segments").update({
-      speaker: "student_gf",
-      speaker_confidence: 0.9,
-      speaker_notes: null,
-      speaker_low_priority: false,
-    }).eq("id", `seg-${job.lesson_id}-2`);
+    await (supabase as unknown as FakeSupabase)
+      .from("transcript_segments")
+      .update({
+        speaker: "student_vincent",
+        speaker_confidence: 0.94,
+        speaker_notes: null,
+        speaker_low_priority: false,
+      })
+      .eq("id", `seg-${job.lesson_id}-0`);
+    await (supabase as unknown as FakeSupabase)
+      .from("transcript_segments")
+      .update({
+        speaker: "teacher",
+        speaker_confidence: 0.88,
+        speaker_notes: "English explanation",
+        speaker_low_priority: true,
+      })
+      .eq("id", `seg-${job.lesson_id}-1`);
+    await (supabase as unknown as FakeSupabase)
+      .from("transcript_segments")
+      .update({
+        speaker: "student_gf",
+        speaker_confidence: 0.9,
+        speaker_notes: null,
+        speaker_low_priority: false,
+      })
+      .eq("id", `seg-${job.lesson_id}-2`);
     return { details: { labels: 3 } };
   };
 
@@ -251,6 +261,7 @@ function buildSteps(): {
         promptVersion: "extract-v1",
       };
     },
+    synthesize: async (input) => Buffer.from(`audio:${input.text}`, "utf8"),
     emailer: {
       sendReady: async () => ({ ok: true, messageId: "msg_test" }),
       sendFailed: async () => ({ ok: true, messageId: "msg_test" }),
@@ -323,9 +334,7 @@ describe("runLessonPipeline extraction integration", () => {
     }
 
     const dialogue = supabase.dialogueClips[0]!;
-    expect(dialogue.storage_path).toBe(
-      `household-1/${LESSON_ID}/clips/dialogues/clip-1.mp3`,
-    );
+    expect(dialogue.storage_path).toBe(`household-1/${LESSON_ID}/clips/dialogues/clip-1.mp3`);
     expect(dialogue.metadata).toMatchObject({
       source_segment_ids: [`seg-${LESSON_ID}-0`, `seg-${LESSON_ID}-1`, `seg-${LESSON_ID}-2`],
       kind: "dialogue",

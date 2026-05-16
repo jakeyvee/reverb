@@ -1,5 +1,12 @@
-import { DIARIZATION_PROMPT_VERSION, EXTRACTION_RUN_KINDS } from "@reverb/ai";
+import {
+  DEFAULT_INDONESIAN_VOICE,
+  DIARIZATION_PROMPT_VERSION,
+  EXTRACTION_RUN_KINDS,
+  GOOGLE_TTS_PROVIDER_ID,
+  INDONESIAN_LANGUAGE_CODE,
+} from "@reverb/ai";
 import type { Json, TablesInsert } from "@reverb/db/types";
+import { generateVocabAudioForLesson } from "./tts.js";
 import type {
   DiarizationOutput,
   DiarizationSegmentLabel,
@@ -399,7 +406,8 @@ function buildExtractionWrites(args: {
   );
   const corrections = uniqueBy(
     args.extraction.teacher_corrections.map((item) => buildCorrectionRow(args, item, promptById)),
-    (row) => `${String(row.segment_id)}|${String(row.kind)}|${String(row.source_text)}|${String(row.corrected_text)}`,
+    (row) =>
+      `${String(row.segment_id)}|${String(row.kind)}|${String(row.source_text)}|${String(row.corrected_text)}`,
   );
 
   const input = {
@@ -482,11 +490,7 @@ async function insertRows(
 ): Promise<void>;
 async function insertRows(
   supabase: ServiceClient,
-  table:
-    | "grammar_patterns"
-    | "dialogue_clips"
-    | "teacher_corrections"
-    | "extraction_runs",
+  table: "grammar_patterns" | "dialogue_clips" | "teacher_corrections" | "extraction_runs",
   rows:
     | Array<TablesInsert<"grammar_patterns">>
     | Array<TablesInsert<"dialogue_clips">>
@@ -713,7 +717,11 @@ function buildPreparedVocab(
   item: ExtractionOutput["new_vocab"][number],
   promptById: Map<string, SegmentForExtraction>,
 ): PreparedVocab {
-  const sourceSegments = resolveSourceSegments(item.sourceSegmentIds, promptById, `vocab item "${item.term}"`);
+  const sourceSegments = resolveSourceSegments(
+    item.sourceSegmentIds,
+    promptById,
+    `vocab item "${item.term}"`,
+  );
   const lemma = normalizeLemma(item.term);
   const reading = normalizeReading(item.pronunciation);
   const segmentIds = sourceSegments.map((segment) => segment.id);
@@ -784,14 +792,25 @@ function buildDialogueRow(
   item: ExtractionOutput["dialogue_clips"][number],
   promptById: Map<string, SegmentForExtraction>,
 ): TablesInsert<"dialogue_clips"> {
-  const start = resolvePromptSegment(item.startSegmentId, promptById, `dialogue clip "${item.id}" startSegmentId`);
-  const end = resolvePromptSegment(item.endSegmentId, promptById, `dialogue clip "${item.id}" endSegmentId`);
+  const start = resolvePromptSegment(
+    item.startSegmentId,
+    promptById,
+    `dialogue clip "${item.id}" startSegmentId`,
+  );
+  const end = resolvePromptSegment(
+    item.endSegmentId,
+    promptById,
+    `dialogue clip "${item.id}" endSegmentId`,
+  );
   if (start.segment_index > end.segment_index) {
     throw new Error(
       `Dialogue clip "${item.id}" has startSegmentId ${item.startSegmentId} after endSegmentId ${item.endSegmentId}`,
     );
   }
-  if (Math.abs(item.startSec - start.start_ms / 1000) > 0.01 || Math.abs(item.endSec - end.end_ms / 1000) > 0.01) {
+  if (
+    Math.abs(item.startSec - start.start_ms / 1000) > 0.01 ||
+    Math.abs(item.endSec - end.end_ms / 1000) > 0.01
+  ) {
     throw new Error(
       `Dialogue clip "${item.id}" does not mirror the transcript time range for ${item.startSegmentId}..${item.endSegmentId}`,
     );
@@ -837,7 +856,11 @@ function buildCorrectionRow(
   item: ExtractionOutput["teacher_corrections"][number],
   promptById: Map<string, SegmentForExtraction>,
 ): TablesInsert<"teacher_corrections"> {
-  const segment = resolvePromptSegment(item.segmentId, promptById, `teacher correction for "${item.utterance}"`);
+  const segment = resolvePromptSegment(
+    item.segmentId,
+    promptById,
+    `teacher correction for "${item.utterance}"`,
+  );
   return {
     household_id: args.lesson.household_id,
     lesson_id: args.lesson.id,
@@ -950,7 +973,9 @@ function normalizeSpeaker(speaker: string | null): SpeakerLabel {
   return "unknown";
 }
 
-function difficultyScore(difficulty: ExtractionOutput["new_vocab"][number]["difficulty"]): number | null {
+function difficultyScore(
+  difficulty: ExtractionOutput["new_vocab"][number]["difficulty"],
+): number | null {
   if (!difficulty) return null;
   switch (difficulty) {
     case "beginner":
@@ -1169,13 +1194,44 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
   };
 }
 
-async function generatingAudioStep({ logger }: StepContext): Promise<StepResult> {
-  // Placeholder for review-clip generation via Google TTS. The real step will
-  // write clip objects to the lesson-clips bucket at a deterministic path
-  // (`{householdId}/{lessonId}/clips/{cardId}.mp3`) so a re-run overwrites
-  // rather than duplicating.
-  logger.info("Audio generation placeholder — would synthesise per-card review clips");
-  return { details: { placeholder: true } };
+async function generatingAudioStep({
+  supabase,
+  services,
+  logger,
+  job,
+}: StepContext): Promise<StepResult> {
+  const lesson = await loadLessonForExtraction(supabase, job.lesson_id);
+  const summary = await generateVocabAudioForLesson({
+    supabase,
+    synthesize: services.synthesize,
+    logger,
+    lessonId: lesson.id,
+    householdId: lesson.household_id,
+    voiceName: DEFAULT_INDONESIAN_VOICE,
+    languageCode: INDONESIAN_LANGUAGE_CODE,
+  });
+
+  logger.info("Generated vocab TTS audio", {
+    lessonId: lesson.id,
+    candidates: summary.candidateCount,
+    alreadyAttached: summary.alreadyAttachedCount,
+    cacheHits: summary.cacheHitCount,
+    synthesized: summary.synthesizedCount,
+    failed: summary.failedCount,
+  });
+
+  return {
+    details: {
+      provider: GOOGLE_TTS_PROVIDER_ID,
+      voice: DEFAULT_INDONESIAN_VOICE,
+      language_code: INDONESIAN_LANGUAGE_CODE,
+      candidate_count: summary.candidateCount,
+      already_attached_count: summary.alreadyAttachedCount,
+      cache_hit_count: summary.cacheHitCount,
+      synthesized_count: summary.synthesizedCount,
+      failed_count: summary.failedCount,
+    },
+  };
 }
 
 export type StepHandlerMap = Record<WorkerStage, StepHandler>;
