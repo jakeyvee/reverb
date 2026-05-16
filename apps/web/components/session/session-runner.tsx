@@ -331,6 +331,11 @@ function CompletionSummary({
         Longest streak: {summary.streak.longestLength} day
         {summary.streak.longestLength === 1 ? "" : "s"}.
       </p>
+      {result.partnerNudge ? (
+        <p className="mt-2 max-w-xs rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-xs text-foreground-muted">
+          {result.partnerNudge}
+        </p>
+      ) : null}
     </Card>
   );
 }
