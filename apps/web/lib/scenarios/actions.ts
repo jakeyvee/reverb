@@ -289,17 +289,31 @@ export type CompleteScenarioResult =
     }
   | { ok: false; error: string };
 
-// Finalises a scenario session:
-//   1. Verifies the user owns the session and it's still active.
-//   2. Refuses to complete a session that has no user turns yet (otherwise
-//      a malicious client could farm XP by spamming `complete` without ever
-//      practising).
-//   3. Marks the row completed and writes xp_earned = SCENARIO_COMPLETION_XP.
-//   4. Inserts a `practice_events` row tagged with kind=session_complete
-//      and payload.source="scenario" so the existing telemetry / weekly XP
-//      readouts can pick it up without a schema change. We attach the
-//      scenario session id via payload so a future analytics pass can join
-//      events back to the scenario row.
+// Finalises a scenario session.
+//
+// The user-visible "+10 XP" claim and the `practice_events` row that drives
+// downstream telemetry must stay in sync — earlier this action flipped the
+// session to `completed` first and treated the practice_events insert as
+// best-effort, which meant a transient telemetry failure left the user
+// thinking they had earned XP that the home / weekly readouts never saw,
+// with no retry path (the `already_completed` branch short-circuited
+// before the event row was even attempted).
+//
+// Order of operations now:
+//   1. Verify ownership, scene-was-actually-played, and session state.
+//   2. Look up an existing `practice_events` row keyed by
+//      `payload.scenario_session_id`. We use jsonb containment so retries
+//      don't double-write.
+//   3. If there is no event row, insert one. On failure we return an error
+//      and leave the session active so the user can retry — the click on
+//      "Finish & claim XP" then re-enters this action and writes the row.
+//   4. Only after the event has landed do we flip the session row to
+//      `completed` + bump `xp_earned`. On the rare update failure the
+//      event row already exists, so the next retry detects it via (2) and
+//      skips straight to the update.
+//
+// `already_completed` therefore means both rows are durable: the session
+// is `completed` *and* the matching telemetry row exists.
 export async function completeScenarioAction(
   input: CompleteScenarioInput,
 ): Promise<CompleteScenarioResult> {
@@ -317,17 +331,7 @@ export async function completeScenarioAction(
   if (!session) {
     return { ok: false, error: "Scenario session not found." };
   }
-
-  if (session.status === "completed") {
-    return {
-      ok: true,
-      sessionId: session.id,
-      status: "already_completed",
-      xpAwarded: 0,
-      totalXp: session.xp_earned,
-    };
-  }
-  if (session.status !== "active") {
+  if (session.status !== "active" && session.status !== "completed") {
     return { ok: false, error: "This scenario session has already ended." };
   }
   if (session.total_user_messages === 0) {
@@ -338,50 +342,81 @@ export async function completeScenarioAction(
   }
 
   const now = new Date();
-  const xpAwarded = SCENARIO_COMPLETION_XP;
-  const totalXp = session.xp_earned + xpAwarded;
+  const alreadyCompleted = session.status === "completed";
 
-  const { error: updateError } = await supabase
-    .from("scenario_sessions")
-    .update({
-      status: "completed",
-      completed_at: now.toISOString(),
-      xp_earned: totalXp,
-    })
-    .eq("id", session.id)
-    .eq("user_id", user.id);
-  if (updateError) {
-    return { ok: false, error: `Could not complete scenario: ${updateError.message}` };
+  // (2) Has a completion event already landed for this scenario session?
+  // The jsonb containment filter (`@>`) matches any row whose payload
+  // includes the given key/value pair, which is the same shape we insert
+  // below — so a retry after a half-completed run finds the prior insert
+  // and we don't write a duplicate. Returning `id` rather than `head` keeps
+  // the row count cheap (PostgREST limits to one).
+  const { data: existingEvents, error: existingEventsError } = await supabase
+    .from("practice_events")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("kind", "session_complete")
+    .contains("payload", { scenario_session_id: session.id })
+    .limit(1);
+  if (existingEventsError) {
+    return {
+      ok: false,
+      error: `Could not check scenario events: ${existingEventsError.message}`,
+    };
+  }
+  const eventExists = (existingEvents ?? []).length > 0;
+
+  if (!eventExists) {
+    const definition = (() => {
+      try {
+        return getScenarioDefinition(ScenarioIdSchema.parse(session.scenario_id));
+      } catch {
+        return null;
+      }
+    })();
+    const eventRow: TablesInsert<"practice_events"> = {
+      user_id: user.id,
+      session_id: null,
+      session_item_id: null,
+      kind: "session_complete",
+      occurred_at: now.toISOString(),
+      payload: {
+        source: "scenario",
+        scenario_session_id: session.id,
+        scenario_id: session.scenario_id,
+        scenario_title: definition?.title ?? null,
+        xp_awarded: SCENARIO_COMPLETION_XP,
+        user_turns: session.total_user_messages,
+      },
+    };
+    const { error: eventError } = await supabase.from("practice_events").insert(eventRow);
+    if (eventError) {
+      // Bubble up so the runner can re-trigger; the session stays active
+      // (or already-completed) and a retry re-enters this branch.
+      return {
+        ok: false,
+        error: `Could not record scenario completion: ${eventError.message}`,
+      };
+    }
   }
 
-  const definition = (() => {
-    try {
-      return getScenarioDefinition(ScenarioIdSchema.parse(session.scenario_id));
-    } catch {
-      return null;
+  // (4) Flip the session row. Idempotent: already-completed sessions just
+  // skip the update and report the existing xp_earned.
+  if (!alreadyCompleted) {
+    const { error: updateError } = await supabase
+      .from("scenario_sessions")
+      .update({
+        status: "completed",
+        completed_at: now.toISOString(),
+        xp_earned: SCENARIO_COMPLETION_XP,
+      })
+      .eq("id", session.id)
+      .eq("user_id", user.id);
+    if (updateError) {
+      // The event row landed (either just now or on a prior attempt). The
+      // next retry will detect that via the containment query above and
+      // skip straight to this update.
+      return { ok: false, error: `Could not complete scenario: ${updateError.message}` };
     }
-  })();
-
-  const eventRow: TablesInsert<"practice_events"> = {
-    user_id: user.id,
-    session_id: null,
-    session_item_id: null,
-    kind: "session_complete",
-    occurred_at: now.toISOString(),
-    payload: {
-      source: "scenario",
-      scenario_session_id: session.id,
-      scenario_id: session.scenario_id,
-      scenario_title: definition?.title ?? null,
-      xp_awarded: xpAwarded,
-      user_turns: session.total_user_messages,
-    },
-  };
-  const { error: eventError } = await supabase.from("practice_events").insert(eventRow);
-  if (eventError) {
-    // Don't fail the user-facing action on a telemetry write — surface to
-    // the console so a follow-up pass can wire structured alerts.
-    console.warn("scenario practice_events insert failed", eventError.message);
   }
 
   revalidatePath("/scenarios");
@@ -389,9 +424,9 @@ export async function completeScenarioAction(
   return {
     ok: true,
     sessionId: session.id,
-    status: "completed",
-    xpAwarded,
-    totalXp,
+    status: alreadyCompleted ? "already_completed" : "completed",
+    xpAwarded: alreadyCompleted ? 0 : SCENARIO_COMPLETION_XP,
+    totalXp: alreadyCompleted ? session.xp_earned : SCENARIO_COMPLETION_XP,
   };
 }
 
