@@ -1,5 +1,6 @@
 "use server";
 
+import { createServiceRoleClient } from "@reverb/db/server";
 import {
   CORRECTION_DRILL_XP_PER_PASS,
   CorrectionDrillResultSchema,
@@ -8,7 +9,9 @@ import {
   type CorrectionDrillResult,
 } from "@reverb/domain/schemas/correction-drill";
 import { requireUser } from "@/lib/auth/get-user";
+import { getProfile } from "@/lib/auth/get-profile";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { buildPartnerNudge, loadHomeMetrics } from "@/lib/home/metrics";
 import {
   completeSession,
   recordSessionItemAnswer,
@@ -231,7 +234,14 @@ export async function startTodaysSessionAction(): Promise<StartTodaysSessionResu
 }
 
 export type CompleteSessionActionResult =
-  | { ok: true; summary: CompleteSessionResult }
+  | {
+      ok: true;
+      summary: CompleteSessionResult;
+      // Session-end nudge text when the user just practised and their
+      // partner hasn't yet today. Null when there's no partner, when both
+      // are done, or when the metrics read failed.
+      partnerNudge: string | null;
+    }
   | { ok: false; error: string };
 
 // Server action the SessionRunner calls after the last item is answered.
@@ -247,8 +257,27 @@ export async function completeSessionAction(input: {
   }
   try {
     const summary = await completeSession(supabase, user.id, input.sessionId);
-    return { ok: true, summary };
+    const partnerNudge = await loadPartnerNudge(user.id);
+    return { ok: true, summary, partnerNudge };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
+}
+
+// Best-effort partner-nudge lookup. The completed session is already
+// persisted; if the household metrics read fails we still return the user's
+// XP summary — the nudge is a small flourish, not a load-bearing piece.
+async function loadPartnerNudge(userId: string): Promise<string | null> {
+  try {
+    const profile = await getProfile(userId);
+    if (!profile) return null;
+    const serviceClient = createServiceRoleClient();
+    const metrics = await loadHomeMetrics(serviceClient, {
+      householdId: profile.householdId,
+      currentUserId: userId,
+    });
+    return buildPartnerNudge(metrics);
+  } catch {
+    return null;
   }
 }
