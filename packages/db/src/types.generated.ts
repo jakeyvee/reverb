@@ -259,6 +259,9 @@ export type Database = {
           speaker_low_priority: boolean;
           language: string | null;
           text: string;
+          translation: string | null;
+          translation_language: string | null;
+          translated_at: string | null;
           metadata: Json;
           created_at: string;
         };
@@ -274,6 +277,9 @@ export type Database = {
           speaker_low_priority?: boolean;
           language?: string | null;
           text: string;
+          translation?: string | null;
+          translation_language?: string | null;
+          translated_at?: string | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -289,6 +295,9 @@ export type Database = {
           speaker_low_priority?: boolean;
           language?: string | null;
           text?: string;
+          translation?: string | null;
+          translation_language?: string | null;
+          translated_at?: string | null;
           metadata?: Json;
           created_at?: string;
         };

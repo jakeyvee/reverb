@@ -45,8 +45,11 @@ export default async function LessonDetailPage({ params }: Props) {
   // worker won't accept a re-enqueue while a run is still in flight — gate
   // the button on the terminal-status condition so partners + transient
   // states don't see a misleading affordance.
+  // Demo seed lessons (VOL-124) are inert fixtures — they never went through
+  // the worker pipeline, so retry / reprocess affordances would dead-end.
+  const isDemo = view.lesson.isDemo;
   const canReprocess =
-    Boolean(user?.isVincent) && status !== null && isTerminalLessonStatus(status);
+    Boolean(user?.isVincent) && !isDemo && status !== null && isTerminalLessonStatus(status);
   const hasReprocessHistory = view.extraction.hasHistory;
   const currentVersion = view.extraction.currentVersion;
 
@@ -70,6 +73,14 @@ export default async function LessonDetailPage({ params }: Props) {
             <p className="mt-2 text-xs text-foreground-subtle">{formatMeta(view)}</p>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-1">
+            {isDemo ? (
+              <span
+                className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent"
+                title="Pre-seeded demo lesson — not produced by the upload pipeline."
+              >
+                Demo
+              </span>
+            ) : null}
             {status ? <LessonStatusBadge status={status} /> : null}
             {hasReprocessHistory || currentVersion > 1 ? (
               <span
@@ -128,9 +139,13 @@ export default async function LessonDetailPage({ params }: Props) {
       <section>
         <SectionHeader
           title="Transcript"
-          description="Raw ASR output. Speaker labels appear once diarization runs."
+          description="Raw ASR output. Toggle translation or click any word to look it up."
         />
-        <TranscriptView segments={view.segments} status={status} />
+        <TranscriptView
+          segments={view.segments}
+          status={status}
+          targetLanguage={view.lesson.targetLanguage ?? view.lesson.sourceLanguage}
+        />
       </section>
     </div>
   );
