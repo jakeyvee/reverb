@@ -9,6 +9,14 @@ import {
   loadShadowingClipsByIds,
   type ShadowingClipView,
 } from "./shadowing";
+import {
+  DEFAULT_LISTENING_LIMIT,
+  assignListeningPrompts,
+  loadListeningClipCandidates,
+  parseListeningPromptFromMetadata,
+  type ListeningItemView,
+  type ListeningPrompt,
+} from "./listening-comprehension";
 
 // VOL-121: Daily session orchestrator.
 //
@@ -25,6 +33,10 @@ import {
 
 const DEFAULT_DRILL_LIMIT = 8;
 const DEFAULT_VOCAB_LIMIT = 12;
+// Listening items are heavier (audio + multi-part prompt), so the default
+// budget per session stays modest. Override via StartOrResumeOptions for
+// tests or future tuning.
+const DEFAULT_LISTENING_SESSION_LIMIT = DEFAULT_LISTENING_LIMIT;
 const DEFAULT_SHADOWING_LIMIT = 3;
 
 export const VOCAB_REVIEW_XP_PER_GOOD_RATING = 3;
@@ -42,21 +54,28 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 }
 
 // Pure assembly of the queue order. Pulled out so the rule (mistake drills
-// always slot ahead of vocab, vocab ahead of shadowing; ordering inside each
-// kind is preserved from the loader) lives in one testable place.
+// always slot ahead of vocab; listening + shadowing trail at the end;
+// ordering inside each kind is preserved from the loader) lives in one
+// testable place.
 //
-// Shadowing slots last because it's the slowest item per attempt (record +
-// playback + self-mark) and the lowest-priority repeatable practice — we'd
-// rather the user finish their vocab + mistake recovery first and treat
-// shadowing as the optional cool-down at the end of the queue.
+// Both listening and shadowing reuse the `dialogue_clip` row kind. They are
+// distinguished by the presence of `metadata.listening`: listening items
+// persist their generated prompt there, shadowing rows leave it null. The
+// hydrator uses that to route each item back to the right runner.
+//
+// Shadowing slots after listening because it's the slowest item per attempt
+// (record + playback + self-mark) — treat it as the optional cool-down at
+// the end of the queue.
 export type AssembledItem =
   | { kind: "mistake_drill"; correctionDrillId: string }
   | { kind: "card"; cardId: string }
+  | { kind: "listening_comprehension"; clipId: string; prompt: ListeningPrompt }
   | { kind: "shadowing"; dialogueClipId: string };
 
 export function assembleSessionQueue(args: {
   corrections: ReadonlyArray<{ drillId: string }>;
   vocabCards: ReadonlyArray<{ cardId: string }>;
+  listening?: ReadonlyArray<{ clipId: string; prompt: ListeningPrompt }>;
   shadowingClips?: ReadonlyArray<{ clipId: string }>;
 }): AssembledItem[] {
   return [
@@ -67,6 +86,11 @@ export function assembleSessionQueue(args: {
     ...args.vocabCards.map<AssembledItem>((card) => ({
       kind: "card",
       cardId: card.cardId,
+    })),
+    ...(args.listening ?? []).map<AssembledItem>((entry) => ({
+      kind: "listening_comprehension",
+      clipId: entry.clipId,
+      prompt: entry.prompt,
     })),
     ...(args.shadowingClips ?? []).map<AssembledItem>((clip) => ({
       kind: "shadowing",
@@ -97,6 +121,13 @@ export type SessionItem =
   | {
       sessionItemId: string;
       position: number;
+      kind: "listening_comprehension";
+      completed: boolean;
+      listening: ListeningItemView;
+    }
+  | {
+      sessionItemId: string;
+      position: number;
       kind: "shadowing";
       completed: boolean;
       clip: ShadowingClipView;
@@ -121,6 +152,7 @@ export type StartOrResumeOptions = {
   now?: Date;
   drillLimit?: number;
   vocabLimit?: number;
+  listeningLimit?: number;
   shadowingLimit?: number;
 };
 
@@ -155,20 +187,26 @@ export async function startOrResumeTodaysSession(
     // queue stay in place.
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
-      const { drills, vocabCards, shadowingClips } = await loadCandidateQueue(supabase, userId, {
-        now,
-        drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
-        vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
-        shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
-      });
+      const { drills, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
+        supabase,
+        userId,
+        {
+          now,
+          drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
+          vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+          listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
+          shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
+        },
+      );
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
         vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
+        listening,
         shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
       });
       if (assembled.length > 0) {
         const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
-          itemToInsertRow(existing.id, userId, index, item),
+          buildSessionItemInsert(existing.id, userId, index, item),
         );
         const { error } = await supabase.from("practice_session_items").insert(itemRows);
         if (error) {
@@ -185,16 +223,22 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, vocabCards, shadowingClips } = await loadCandidateQueue(supabase, userId, {
-    now,
-    drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
-    vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
-    shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
-  });
+  const { drills, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
+    supabase,
+    userId,
+    {
+      now,
+      drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
+      vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+      listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
+      shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
+    },
+  );
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
     vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
+    listening,
     shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
   });
 
@@ -219,7 +263,7 @@ export async function startOrResumeTodaysSession(
 
   if (assembled.length > 0) {
     const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
-      itemToInsertRow(insertedSession.id, userId, index, item),
+      buildSessionItemInsert(insertedSession.id, userId, index, item),
     );
     const { error: itemsError } = await supabase.from("practice_session_items").insert(itemRows);
     if (itemsError) {
@@ -230,7 +274,17 @@ export async function startOrResumeTodaysSession(
   await appendPracticeEvent(supabase, userId, {
     session_id: insertedSession.id,
     kind: "session_start",
-    payload: { item_count: assembled.length, source: "daily_orchestrator" },
+    payload: {
+      item_count: assembled.length,
+      source: "daily_orchestrator",
+      kinds: {
+        mistake_drill: assembled.filter((item) => item.kind === "mistake_drill").length,
+        card: assembled.filter((item) => item.kind === "card").length,
+        listening_comprehension: assembled.filter((item) => item.kind === "listening_comprehension")
+          .length,
+        shadowing: assembled.filter((item) => item.kind === "shadowing").length,
+      },
+    },
   });
 
   return hydrateSession(supabase, userId, insertedSession);
@@ -271,14 +325,21 @@ async function findActiveSessionForDay(
 async function loadCandidateQueue(
   supabase: SupabaseClient<Database>,
   userId: string,
-  args: { now: Date; drillLimit: number; vocabLimit: number; shadowingLimit: number },
+  args: {
+    now: Date;
+    drillLimit: number;
+    vocabLimit: number;
+    listeningLimit: number;
+    shadowingLimit: number;
+  },
 ): Promise<{
   drills: CorrectionDrillView[];
   vocabCards: ReviewableVocabCard[];
+  listening: Array<{ clipId: string; prompt: ListeningPrompt }>;
   shadowingClips: ShadowingClipView[];
 }> {
   const nowIso = args.now.toISOString();
-  const [drillResp, vocab, shadowing] = await Promise.all([
+  const [drillResp, vocab, listeningCandidates, shadowing] = await Promise.all([
     supabase
       .from("correction_drills")
       .select(
@@ -290,11 +351,22 @@ async function loadCandidateQueue(
       .order("due_at", { ascending: true })
       .limit(args.drillLimit * 2),
     loadDueVocabReviewCards(supabase, userId, { now: args.now, limit: args.vocabLimit }),
+    loadListeningClipCandidates(supabase, { limit: Math.max(args.listeningLimit * 3, 6) }),
     loadShadowingCandidates(supabase, userId, { limit: args.shadowingLimit }),
   ]);
   if (drillResp.error) {
     throw new Error(`Could not load drill candidates: ${drillResp.error.message}`);
   }
+  // Don't queue the same clip twice — if a clip is already going out as a
+  // shadowing item, drop it from the listening candidate pool so the user
+  // doesn't see the same audio back-to-back under two different prompts.
+  const shadowingClipIds = new Set(shadowing.map((s) => s.clipId));
+  const filteredListeningCandidates = listeningCandidates.filter(
+    (c) => !shadowingClipIds.has(c.clipId),
+  );
+  const listening = assignListeningPrompts(filteredListeningCandidates, {
+    limit: args.listeningLimit,
+  }).map((entry) => ({ clipId: entry.clip.clipId, prompt: entry.prompt }));
   const drills: CorrectionDrillView[] = [];
   for (const row of drillResp.data ?? []) {
     const correction = Array.isArray(row.teacher_correction)
@@ -325,51 +397,56 @@ async function loadCandidateQueue(
       confidenceTier: tier,
     });
   }
-  return { drills, vocabCards: vocab, shadowingClips: shadowing };
+  return { drills, vocabCards: vocab, listening, shadowingClips: shadowing };
 }
 
-// Translates an `AssembledItem` into the insert row for
-// `practice_session_items`. Centralises the kind ↔ FK-column mapping so the
-// two call sites (fresh session insert + same-day top-up) can't drift.
-// `shadowing` maps to `dialogue_clip` because the schema's `practice_item_kind`
-// uses `dialogue_clip` for any audio-shadowing item.
-function itemToInsertRow(
+// Maps an assembled item into the practice_session_items insert row. The
+// kind column lines up with the per-item FK as enforced by
+// enforce_practice_session_item_target. Both listening and shadowing reuse
+// the `dialogue_clip` kind + FK; listening items carry the generated prompt
+// in `metadata.listening`, shadowing items leave `metadata` null. The
+// hydrator uses that distinction to pick which runner view to build.
+function buildSessionItemInsert(
   sessionId: string,
   userId: string,
   position: number,
   item: AssembledItem,
 ): TablesInsert<"practice_session_items"> {
-  if (item.kind === "card") {
-    return {
-      session_id: sessionId,
-      user_id: userId,
-      position,
-      kind: "card",
-      card_id: item.cardId,
-      correction_drill_id: null,
-      dialogue_clip_id: null,
-    };
+  switch (item.kind) {
+    case "mistake_drill":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "mistake_drill",
+        correction_drill_id: item.correctionDrillId,
+      };
+    case "card":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "card",
+        card_id: item.cardId,
+      };
+    case "listening_comprehension":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "dialogue_clip",
+        dialogue_clip_id: item.clipId,
+        metadata: { listening: item.prompt },
+      };
+    case "shadowing":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "dialogue_clip",
+        dialogue_clip_id: item.dialogueClipId,
+      };
   }
-  if (item.kind === "mistake_drill") {
-    return {
-      session_id: sessionId,
-      user_id: userId,
-      position,
-      kind: "mistake_drill",
-      card_id: null,
-      correction_drill_id: item.correctionDrillId,
-      dialogue_clip_id: null,
-    };
-  }
-  return {
-    session_id: sessionId,
-    user_id: userId,
-    position,
-    kind: "dialogue_clip",
-    card_id: null,
-    correction_drill_id: null,
-    dialogue_clip_id: item.dialogueClipId,
-  };
 }
 
 // Hydrate a session row + its items into the view model the UI consumes.
@@ -384,7 +461,7 @@ async function hydrateSession(
   const { data: itemRows, error: itemsError } = await supabase
     .from("practice_session_items")
     .select(
-      "id, position, kind, card_id, correction_drill_id, dialogue_clip_id, answered_at, rating, correct, response_ms",
+      "id, position, kind, card_id, correction_drill_id, dialogue_clip_id, answered_at, rating, correct, response_ms, metadata",
     )
     .eq("session_id", session.id)
     .order("position", { ascending: true });
@@ -394,27 +471,50 @@ async function hydrateSession(
   const rows = itemRows ?? [];
   const drillIds: string[] = [];
   const cardIds: string[] = [];
-  const dialogueClipIds: string[] = [];
+  // Dialogue-clip rows split between shadowing and listening based on
+  // whether `metadata.listening` is populated. Two id buckets so each
+  // loader only signs URLs for the clips it actually needs.
+  const listeningClipIds: string[] = [];
+  const shadowingClipIds: string[] = [];
+  type RowKind = "mistake_drill" | "card" | "listening_comprehension" | "shadowing";
+  const rowKinds = new Map<string, RowKind>();
   for (const row of rows) {
     if (row.kind === "mistake_drill" && row.correction_drill_id) {
       drillIds.push(row.correction_drill_id);
+      rowKinds.set(row.id, "mistake_drill");
     } else if (row.kind === "card" && row.card_id) {
       cardIds.push(row.card_id);
+      rowKinds.set(row.id, "card");
     } else if (row.kind === "dialogue_clip" && row.dialogue_clip_id) {
-      dialogueClipIds.push(row.dialogue_clip_id);
+      // Listening rows always carry `metadata.listening`; shadowing rows
+      // were inserted with metadata=null. A row that has neither (old data,
+      // or an external insert) falls through to shadowing — that runner
+      // tolerates missing audio more gracefully than the listening one.
+      const prompt = parseListeningPromptFromMetadata(row.metadata);
+      if (prompt) {
+        listeningClipIds.push(row.dialogue_clip_id);
+        rowKinds.set(row.id, "listening_comprehension");
+      } else {
+        shadowingClipIds.push(row.dialogue_clip_id);
+        rowKinds.set(row.id, "shadowing");
+      }
     }
   }
 
-  const [drillsById, cardsById, clipsById] = await Promise.all([
+  const [drillsById, cardsById, listeningById, shadowingById] = await Promise.all([
     drillIds.length > 0 ? loadDrillsByIds(supabase, userId, drillIds) : new Map(),
     cardIds.length > 0 ? loadCardsByIds(supabase, userId, cardIds) : new Map(),
-    dialogueClipIds.length > 0 ? loadShadowingClipsByIds(supabase, dialogueClipIds) : new Map(),
+    listeningClipIds.length > 0
+      ? loadListeningClipsByIds(supabase, listeningClipIds)
+      : new Map<string, ListeningClipHydration>(),
+    shadowingClipIds.length > 0 ? loadShadowingClipsByIds(supabase, shadowingClipIds) : new Map(),
   ]);
 
   const items: SessionItem[] = [];
   let unresolved = 0;
   for (const row of rows) {
-    if (row.kind === "mistake_drill") {
+    const resolvedKind = rowKinds.get(row.id);
+    if (resolvedKind === "mistake_drill") {
       const drill = row.correction_drill_id ? drillsById.get(row.correction_drill_id) : undefined;
       if (!drill) {
         unresolved += 1;
@@ -427,7 +527,7 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         drill,
       });
-    } else if (row.kind === "card") {
+    } else if (resolvedKind === "card") {
       const card = row.card_id ? cardsById.get(row.card_id) : undefined;
       if (!card) {
         unresolved += 1;
@@ -440,8 +540,32 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         card,
       });
-    } else if (row.kind === "dialogue_clip") {
-      const clip = row.dialogue_clip_id ? clipsById.get(row.dialogue_clip_id) : undefined;
+    } else if (resolvedKind === "listening_comprehension") {
+      const hydration = row.dialogue_clip_id ? listeningById.get(row.dialogue_clip_id) : undefined;
+      const prompt = parseListeningPromptFromMetadata(row.metadata);
+      if (!hydration || !prompt) {
+        // Either the source clip vanished (set null on delete) or the
+        // row was written by a different subsystem and lacks our prompt
+        // metadata. Either way, drop it without failing the page.
+        unresolved += 1;
+        continue;
+      }
+      items.push({
+        sessionItemId: row.id,
+        position: row.position,
+        kind: "listening_comprehension",
+        completed: row.answered_at !== null,
+        listening: {
+          clipId: hydration.clipId,
+          lessonId: hydration.lessonId,
+          lessonTitle: hydration.lessonTitle,
+          audioUrl: hydration.audioUrl,
+          durationMs: hydration.durationMs,
+          prompt,
+        },
+      });
+    } else if (resolvedKind === "shadowing") {
+      const clip = row.dialogue_clip_id ? shadowingById.get(row.dialogue_clip_id) : undefined;
       if (!clip) {
         // Either the clip was pruned or it lost its materialised audio (the
         // shadowing loader filters those out). Drop it so the runner doesn't
@@ -457,10 +581,8 @@ async function hydrateSession(
         clip,
       });
     } else {
-      // Unknown kind (grammar_exercise placeholder). The orchestrator
-      // currently emits only `card`, `mistake_drill`, and `dialogue_clip`, so
-      // an unknown row is data drift — drop it from the queue rather than
-      // failing the whole page.
+      // Unknown kind (grammar_exercise placeholder, or a dialogue_clip row
+      // that lacked an FK). Drop rather than failing the whole page.
       unresolved += 1;
     }
   }
@@ -521,6 +643,82 @@ async function loadDrillsByIds(
     });
   }
   return out;
+}
+
+type ListeningClipHydration = {
+  clipId: string;
+  lessonId: string;
+  lessonTitle: string | null;
+  audioUrl: string | null;
+  durationMs: number;
+};
+
+async function loadListeningClipsByIds(
+  supabase: SupabaseClient<Database>,
+  ids: string[],
+): Promise<Map<string, ListeningClipHydration>> {
+  const { data, error } = await supabase
+    .from("dialogue_clips")
+    .select("id, lesson_id, start_ms, end_ms, storage_bucket, storage_path")
+    .in("id", ids);
+  if (error) {
+    throw new Error(`Could not load dialogue_clips: ${error.message}`);
+  }
+  const rows = data ?? [];
+  if (rows.length === 0) return new Map();
+
+  const lessonTitleById = await resolveDialogueLessonTitles(
+    supabase,
+    rows.map((row) => row.lesson_id),
+  );
+  const signedUrlByPath = await signListeningClipAudio(supabase, rows);
+
+  const out = new Map<string, ListeningClipHydration>();
+  for (const row of rows) {
+    out.set(row.id, {
+      clipId: row.id,
+      lessonId: row.lesson_id,
+      lessonTitle: lessonTitleById.get(row.lesson_id) ?? null,
+      audioUrl: signedUrlByPath.get(`${row.storage_bucket}:${row.storage_path}`) ?? null,
+      durationMs: Math.max(0, row.end_ms - row.start_ms),
+    });
+  }
+  return out;
+}
+
+async function signListeningClipAudio(
+  supabase: SupabaseClient<Database>,
+  rows: ReadonlyArray<{ storage_bucket: string; storage_path: string }>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const results = await Promise.all(
+    rows.map(async (row) => {
+      if (!SUPPORTED_AUDIO_BUCKETS.has(row.storage_bucket)) return null;
+      const { data, error } = await supabase.storage
+        .from(row.storage_bucket)
+        .createSignedUrl(row.storage_path, AUDIO_SIGNED_URL_TTL_SECONDS);
+      if (error || !data?.signedUrl) return null;
+      return { key: `${row.storage_bucket}:${row.storage_path}`, url: data.signedUrl };
+    }),
+  );
+  for (const result of results) {
+    if (result) out.set(result.key, result.url);
+  }
+  return out;
+}
+
+async function resolveDialogueLessonTitles(
+  supabase: SupabaseClient<Database>,
+  lessonIds: ReadonlyArray<string>,
+): Promise<Map<string, string>> {
+  const ids = new Set(lessonIds);
+  if (ids.size === 0) return new Map();
+  const { data, error } = await supabase
+    .from("lessons")
+    .select("id, title")
+    .in("id", Array.from(ids));
+  if (error || !data) return new Map();
+  return new Map(data.map((row) => [row.id, row.title] as const));
 }
 
 async function loadCardsByIds(
