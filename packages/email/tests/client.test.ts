@@ -79,6 +79,25 @@ describe("sendEmail", () => {
     }
   });
 
+  it("returns ok=false instead of throwing when RESEND_API_KEY is missing", async () => {
+    delete process.env.RESEND_API_KEY;
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await sendEmail({
+      to: "vincent@example.com",
+      subject: "x",
+      html: "x",
+      text: "x",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("RESEND_API_KEY");
+      expect(result.status).toBeNull();
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns ok=false when the network call throws", async () => {
     globalThis.fetch = (() =>
       Promise.reject(new Error("connection reset"))) as unknown as typeof fetch;

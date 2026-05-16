@@ -31,7 +31,16 @@ export type SendEmailResult =
 // the failure and continue (lesson processing must not roll back on a Resend
 // hiccup; see VOL-125 acceptance criteria).
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
-  const apiKey = emailEnv.resendApiKey();
+  let apiKey: string;
+  try {
+    apiKey = emailEnv.resendApiKey();
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      status: null,
+    };
+  }
   const headers: Record<string, string> = {
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
