@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, TablesInsert, TablesUpdate } from "@reverb/db/types";
-import { ReviewRatingSchema, type ReviewRating } from "@reverb/domain";
+import { ReviewRatingSchema, type ReviewRating } from "@reverb/domain/schemas/review";
 import {
   newStoredCard,
   scheduleStoredReview,
@@ -21,6 +21,9 @@ export type DueVocabCard = {
     partOfSpeech: string | null;
     exampleSentence: string | null;
     exampleTranslation: string | null;
+    lessonId: string | null;
+    audioStorageBucket: string | null;
+    audioStoragePath: string | null;
   };
 };
 
@@ -46,7 +49,7 @@ export async function loadDueVocabCards(
   const { data, error } = await supabase
     .from("cards")
     .select(
-      "id, vocab_item_id, state, due_at, reps, lapses, vocab_item:vocab_items!inner(lemma, reading, translation, part_of_speech, example_sentence, example_translation)",
+      "id, vocab_item_id, state, due_at, reps, lapses, vocab_item:vocab_items!inner(lemma, reading, translation, part_of_speech, example_sentence, example_translation, lesson_id, audio_storage_bucket, audio_storage_path)",
     )
     .eq("user_id", userId)
     .lte("due_at", now.toISOString())
@@ -72,6 +75,9 @@ export async function loadDueVocabCards(
         partOfSpeech: vocab?.part_of_speech ?? null,
         exampleSentence: vocab?.example_sentence ?? null,
         exampleTranslation: vocab?.example_translation ?? null,
+        lessonId: vocab?.lesson_id ?? null,
+        audioStorageBucket: vocab?.audio_storage_bucket ?? null,
+        audioStoragePath: vocab?.audio_storage_path ?? null,
       },
     };
   });

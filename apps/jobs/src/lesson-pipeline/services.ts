@@ -15,6 +15,7 @@ import {
   type TranscribeAudioResult,
 } from "@reverb/ai";
 import { defaultLessonEmailer, type LessonEmailer } from "@reverb/email";
+import type { MediaToolOptions } from "./media.js";
 import type { EmailRecipientResolver, VincentEmailResolver } from "./notifications.js";
 import type { ServiceClient } from "./state.js";
 
@@ -27,6 +28,11 @@ export type PipelineServices = {
   transcribe: Transcriber;
   diarize: Diarizer;
   extract: Extractor;
+  // Optional ffmpeg/ffprobe overrides for the clip-generation step. Production
+  // leaves it unset (the helpers in @reverb/media auto-resolve the static
+  // binary); tests inject a fake runner so the orchestrator can be exercised
+  // without spawning a real ffmpeg.
+  mediaTools?: MediaToolOptions;
   // Google TTS synthesiser for the `generating_audio` stage. Tests inject a
   // capturing stub so they can assert request mapping and cache behaviour
   // without hitting Google.

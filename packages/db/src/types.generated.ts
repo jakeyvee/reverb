@@ -376,6 +376,8 @@ export type Database = {
           cost_cents: number | null;
           started_at: string | null;
           finished_at: string | null;
+          version: number;
+          superseded_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -392,6 +394,8 @@ export type Database = {
           cost_cents?: number | null;
           started_at?: string | null;
           finished_at?: string | null;
+          version?: number;
+          superseded_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -408,6 +412,8 @@ export type Database = {
           cost_cents?: number | null;
           started_at?: string | null;
           finished_at?: string | null;
+          version?: number;
+          superseded_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -417,6 +423,73 @@ export type Database = {
             columns: ["lesson_id"];
             isOneToOne: false;
             referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      extraction_flags: {
+        Row: {
+          id: string;
+          household_id: string;
+          lesson_id: string;
+          target_kind: Database["public"]["Enums"]["extraction_flag_target_kind"];
+          target_id: string;
+          reason: Database["public"]["Enums"]["extraction_flag_reason"];
+          notes: string | null;
+          flagged_by: string;
+          extraction_run_id: string | null;
+          model: string | null;
+          prompt_version: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id: string;
+          lesson_id: string;
+          target_kind: Database["public"]["Enums"]["extraction_flag_target_kind"];
+          target_id: string;
+          reason: Database["public"]["Enums"]["extraction_flag_reason"];
+          notes?: string | null;
+          flagged_by: string;
+          extraction_run_id?: string | null;
+          model?: string | null;
+          prompt_version?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string;
+          lesson_id?: string;
+          target_kind?: Database["public"]["Enums"]["extraction_flag_target_kind"];
+          target_id?: string;
+          reason?: Database["public"]["Enums"]["extraction_flag_reason"];
+          notes?: string | null;
+          flagged_by?: string;
+          extraction_run_id?: string | null;
+          model?: string | null;
+          prompt_version?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "extraction_flags_household_id_fkey";
+            columns: ["household_id"];
+            isOneToOne: false;
+            referencedRelation: "households";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "extraction_flags_lesson_id_fkey";
+            columns: ["lesson_id"];
+            isOneToOne: false;
+            referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "extraction_flags_extraction_run_id_fkey";
+            columns: ["extraction_run_id"];
+            isOneToOne: false;
+            referencedRelation: "extraction_runs";
             referencedColumns: ["id"];
           },
         ];
@@ -1318,6 +1391,146 @@ export type Database = {
           },
         ];
       };
+      chat_sessions: {
+        Row: {
+          id: string;
+          user_id: string;
+          level: string;
+          status: string;
+          summary: string | null;
+          total_messages: number;
+          total_user_messages: number;
+          last_message_at: string | null;
+          ended_at: string | null;
+          metadata: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          level?: string;
+          status?: string;
+          summary?: string | null;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          ended_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          level?: string;
+          status?: string;
+          summary?: string | null;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          ended_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      chat_messages: {
+        Row: {
+          id: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
+          user_id?: string;
+          role?: Database["public"]["Enums"]["chat_message_role"];
+          content?: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "chat_messages_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      chat_corrections: {
+        Row: {
+          id: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          message_id?: string;
+          session_id?: string;
+          user_id?: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text?: string;
+          corrected_text?: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "chat_corrections_message_id_fkey";
+            columns: ["message_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_messages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "chat_corrections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -1326,6 +1539,14 @@ export type Database = {
       current_household_id: {
         Args: Record<PropertyKey, never>;
         Returns: string;
+      };
+      bump_chat_session_counters: {
+        Args: {
+          p_session_id: string;
+          p_message_increment?: number;
+          p_user_message_increment?: number;
+        };
+        Returns: undefined;
       };
     };
     Enums: {
@@ -1346,6 +1567,14 @@ export type Database = {
         | "failed";
       extraction_run_kind: "vocab" | "grammar" | "dialogue" | "corrections";
       extraction_run_status: "queued" | "running" | "succeeded" | "failed";
+      extraction_flag_target_kind: "vocab" | "grammar" | "dialogue" | "correction";
+      extraction_flag_reason:
+        | "wrong_translation"
+        | "not_a_word"
+        | "wrong_split"
+        | "duplicate"
+        | "low_value"
+        | "other";
       card_state: "new" | "learning" | "review" | "relearning";
       review_rating: "again" | "hard" | "good" | "easy";
       grammar_exercise_kind: "fill_blank" | "multiple_choice" | "translate" | "reorder";
@@ -1371,6 +1600,8 @@ export type Database = {
       notification_status: "queued" | "sent" | "failed" | "cancelled";
       correction_drill_state: "new" | "learning" | "retired";
       correction_drill_result: "pass" | "fail";
+      chat_message_role: "user" | "assistant";
+      chat_correction_kind: "grammar" | "vocabulary" | "pronunciation" | "usage";
     };
     CompositeTypes: {
       [_ in never]: never;

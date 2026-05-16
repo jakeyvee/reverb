@@ -18,6 +18,7 @@ export type RetryLessonProcessingResult = { ok: true } | { ok: false; error: str
 type JobMetadata = {
   stages?: Record<string, { completed_at?: string }>;
   last_failure?: { stage?: string | null; message?: string };
+  last_reprocess?: { requested_at: string; requested_by: string };
   [key: string]: unknown;
 };
 
@@ -92,18 +93,12 @@ export async function retryLessonProcessing(
   const failedStage =
     typeof metadata.last_failure?.stage === "string" ? metadata.last_failure.stage : null;
 
-  // Reset derived rows for the failed phase. extracting is the only stage
-  // that inserts rows without a natural key today; the others upsert on a
-  // deterministic key and stay idempotent on replay.
-  if (failedStage === "extracting") {
-    const { error: deleteError } = await supabase
-      .from("extraction_runs")
-      .delete()
-      .eq("lesson_id", parsed.data.lessonId);
-    if (deleteError) {
-      return { ok: false, error: "Could not reset extraction state." };
-    }
-  }
+  // The worker's `STAGE_RESET_HOOKS.extracting` now handles every reset that
+  // belongs to the extracting phase (grammar/dialogue truncation +
+  // marking prior extraction_runs as superseded inside the step itself).
+  // VOL-136 made the row-management explicit there because corrections need
+  // an upsert path that can't be expressed as a blanket delete; nothing for
+  // this action to do for that stage anymore.
 
   // Clear the failed stage's completion marker — the worker uses it to skip
   // already-done stages, and we want this specific stage to actually re-run.
@@ -157,6 +152,154 @@ export async function retryLessonProcessing(
   revalidatePath("/");
   revalidatePath("/lessons");
   revalidatePath("/upload");
+  revalidatePath("/notifications");
+
+  return { ok: true };
+}
+
+const ReprocessInputSchema = z.object({
+  lessonId: z.string().uuid(),
+});
+
+export type ReprocessLessonInput = z.infer<typeof ReprocessInputSchema>;
+export type ReprocessLessonResult = { ok: true } | { ok: false; error: string };
+
+// Vincent-only "re-run extraction" path. Sister action to retryLessonProcessing
+// but for already-ready lessons whose extraction quality we want to re-derive
+// — e.g. after a prompt change. The contract:
+//
+//   1. Same auth + household scope checks as retryLessonProcessing (only the
+//      upload account drives reprocessing).
+//   2. The lesson must already be `ready` or `failed` — there's no point
+//      re-extracting a job that's still mid-pipeline, and queueing on top of
+//      an in-flight run would create idempotency-key contention.
+//   3. Reset the extracting + generating_audio completion markers so the
+//      worker actually re-runs those stages instead of short-circuiting.
+//      Transcribing + diarizing stay intact: the audio hasn't changed, so
+//      re-running them would burn provider credits for no benefit.
+//   4. Flip the row back to the extracting stage and re-enqueue. The
+//      worker's existing version-bump logic in `steps.ts` handles the rest:
+//      prior extraction_runs get superseded, vocab dedupe keeps cards
+//      stable, corrections upsert keeps correction_drills stable.
+export async function reprocessLesson(input: ReprocessLessonInput): Promise<ReprocessLessonResult> {
+  const parsed = ReprocessInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid request." };
+  }
+
+  const user = await getUser();
+  if (!user || !user.isAllowed) {
+    return { ok: false, error: "Sign in to reprocess." };
+  }
+  if (!user.isVincent) {
+    return { ok: false, error: "Only the upload account can reprocess a lesson." };
+  }
+
+  const profile = await getProfile(user.id);
+  if (!profile) {
+    return { ok: false, error: "Could not resolve your household." };
+  }
+
+  const supabase = createServiceRoleClient();
+
+  const { data: lesson, error: lessonError } = await supabase
+    .from("lessons")
+    .select("id, household_id")
+    .eq("id", parsed.data.lessonId)
+    .maybeSingle();
+  if (lessonError || !lesson) {
+    return { ok: false, error: "Lesson not found." };
+  }
+  if (lesson.household_id !== profile.householdId) {
+    return { ok: false, error: "Lesson not found." };
+  }
+
+  const { data: job, error: jobError } = await supabase
+    .from("lesson_jobs")
+    .select("status, provider_metadata")
+    .eq("lesson_id", parsed.data.lessonId)
+    .maybeSingle();
+  if (jobError) {
+    return { ok: false, error: "Could not read the job." };
+  }
+  if (!job) {
+    return { ok: false, error: "This lesson has not been processed yet." };
+  }
+  if (job.status !== "ready" && job.status !== "failed") {
+    return { ok: false, error: "Wait for the current run to finish before reprocessing." };
+  }
+
+  const metadata: JobMetadata =
+    job.provider_metadata &&
+    typeof job.provider_metadata === "object" &&
+    !Array.isArray(job.provider_metadata)
+      ? (job.provider_metadata as JobMetadata)
+      : {};
+
+  // Clear the stages we want to actually re-run. Transcribing + diarizing
+  // are deliberately kept — the audio is unchanged, so re-running them
+  // burns credits without adding value. The worker's stage reset hook for
+  // extracting handles wiping grammar/dialogue + marking prior
+  // extraction_runs superseded, so we only need to invalidate the markers
+  // here.
+  const stages = metadata.stages ? { ...metadata.stages } : {};
+  delete stages.extracting;
+  delete stages.generating_audio;
+
+  const nextMetadata: JobMetadata = {
+    ...metadata,
+    stages,
+    last_reprocess: {
+      requested_at: new Date().toISOString(),
+      requested_by: user.id,
+    },
+  };
+
+  const { error: updateError } = await supabase
+    .from("lesson_jobs")
+    .update({
+      // `extracting` is the stage the worker will resume at because that's
+      // the earliest unfinished stage after the markers above were cleared.
+      // Status is the public-facing label the UI renders, so we set it to
+      // match.
+      status: "extracting",
+      error_summary: null,
+      failed_at: null,
+      finished_at: null,
+      provider_metadata: nextMetadata as unknown as Json,
+    })
+    .eq("lesson_id", parsed.data.lessonId);
+  if (updateError) {
+    return { ok: false, error: "Could not re-queue the lesson." };
+  }
+
+  await supabase.from("lessons").update({ status: "processing" }).eq("id", parsed.data.lessonId);
+
+  const enqueue = await enqueueLessonProcessing(parsed.data.lessonId);
+  if (enqueue.ok && !enqueue.skipped && enqueue.runId) {
+    const { error: tagError } = await supabase
+      .from("lesson_jobs")
+      .update({ trigger_run_id: enqueue.runId })
+      .eq("lesson_id", parsed.data.lessonId);
+    if (tagError) {
+      console.error("[reprocess] could not record trigger_run_id", tagError);
+    }
+  } else if (!enqueue.ok) {
+    const summary = `Could not enqueue reprocess: ${enqueue.error}`;
+    await supabase
+      .from("lesson_jobs")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_summary: summary,
+      })
+      .eq("lesson_id", parsed.data.lessonId);
+    return { ok: false, error: summary };
+  }
+
+  revalidatePath("/");
+  revalidatePath("/lessons");
+  revalidatePath(`/lessons/${parsed.data.lessonId}`);
   revalidatePath("/notifications");
 
   return { ok: true };
