@@ -1541,6 +1541,152 @@ export type Database = {
           },
         ];
       };
+      scenario_sessions: {
+        Row: {
+          id: string;
+          user_id: string;
+          scenario_id: string;
+          level: string;
+          status: string;
+          xp_earned: number;
+          total_messages: number;
+          total_user_messages: number;
+          last_message_at: string | null;
+          completed_at: string | null;
+          abandoned_at: string | null;
+          metadata: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          scenario_id: string;
+          level?: string;
+          status?: string;
+          xp_earned?: number;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          completed_at?: string | null;
+          abandoned_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          scenario_id?: string;
+          level?: string;
+          status?: string;
+          xp_earned?: number;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          completed_at?: string | null;
+          abandoned_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      scenario_messages: {
+        Row: {
+          id: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
+          user_id?: string;
+          role?: Database["public"]["Enums"]["chat_message_role"];
+          content?: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "scenario_messages_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      scenario_corrections: {
+        Row: {
+          id: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          message_id?: string;
+          session_id?: string;
+          user_id?: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text?: string;
+          corrected_text?: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "scenario_corrections_message_id_fkey";
+            columns: ["message_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_messages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "scenario_corrections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -1551,6 +1697,14 @@ export type Database = {
         Returns: string;
       };
       bump_chat_session_counters: {
+        Args: {
+          p_session_id: string;
+          p_message_increment?: number;
+          p_user_message_increment?: number;
+        };
+        Returns: undefined;
+      };
+      bump_scenario_session_counters: {
         Args: {
           p_session_id: string;
           p_message_increment?: number;
