@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Tables } from "@reverb/db/types";
 import { LESSON_AUDIO_BUCKET } from "@reverb/domain/schemas/upload";
-import { SCHEMA_VERSIONS, type Transcript } from "@reverb/domain";
+import { SCHEMA_VERSIONS, type ExtractionOutput, type Transcript } from "@reverb/domain";
 import { runLessonPipeline } from "../../src/lesson-pipeline/orchestrator.js";
 import type { ServiceClient } from "../../src/lesson-pipeline/state.js";
 import type { PipelineServices } from "../../src/lesson-pipeline/services.js";
@@ -138,6 +138,19 @@ function fixtureTranscript(): Transcript {
   };
 }
 
+function emptyExtraction(sourceTranscriptId: string): ExtractionOutput {
+  return {
+    schemaVersion: SCHEMA_VERSIONS.extractionOutput,
+    promptVersion: "stub",
+    language: "id",
+    sourceTranscriptId,
+    new_vocab: [],
+    grammar_patterns: [],
+    dialogue_clips: [],
+    teacher_corrections: [],
+  };
+}
+
 function fixtureServices(): PipelineServices {
   return {
     transcribe: async () => ({
@@ -167,7 +180,7 @@ function fixtureServices(): PipelineServices {
       model: "stub",
       promptVersion: "stub",
     }),
-    // Extraction returns no vocab/grammar/etc — these tests are about the
+    // Extraction returns no vocab/grammar/etc - these tests are about the
     // transcribing stage; the empty payload lets the orchestrator finish
     // without exercising the Anthropic call or the per-user card writes.
     extract: async ({ sourceTranscriptId, language }) => ({
@@ -267,6 +280,24 @@ describe("transcribing stage", () => {
       transcribe: async () => {
         throw new Error("groq returned 503");
       },
+      diarize: async ({ sourceTranscriptId }) => ({
+        diarization: {
+          schemaVersion: SCHEMA_VERSIONS.diarization,
+          promptVersion: "stub",
+          model: "stub",
+          sourceTranscriptId,
+          segments: [],
+        },
+        rawResponse: "{}",
+        model: "stub",
+        promptVersion: "stub",
+      }),
+      extract: async ({ sourceTranscriptId }) => ({
+        extraction: emptyExtraction(sourceTranscriptId),
+        rawResponse: "{}",
+        model: "stub",
+        promptVersion: "stub",
+      }),
     };
 
     await expect(

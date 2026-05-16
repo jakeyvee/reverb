@@ -5,6 +5,7 @@ import {
   SCHEMA_VERSIONS,
   type DiarizationInput,
   type DiarizationOutput,
+  type ExtractionOutput,
   type Transcript,
 } from "@reverb/domain";
 import { runLessonPipeline } from "../../src/lesson-pipeline/orchestrator.js";
@@ -143,6 +144,19 @@ function correctionExchangeTranscript(): Transcript {
 }
 
 type DiarizeStub = (input: DiarizationInput) => DiarizationOutput;
+
+function emptyExtraction(sourceTranscriptId: string): ExtractionOutput {
+  return {
+    schemaVersion: SCHEMA_VERSIONS.extractionOutput,
+    promptVersion: "stub",
+    language: "id",
+    sourceTranscriptId,
+    new_vocab: [],
+    grammar_patterns: [],
+    dialogue_clips: [],
+    teacher_corrections: [],
+  };
+}
 
 function buildServices(diarizeStub: DiarizeStub): PipelineServices & {
   diarize: ReturnType<typeof vi.fn>;
@@ -390,6 +404,12 @@ describe("diarizing stage", () => {
       diarize: async () => {
         throw new Error("anthropic returned 503");
       },
+      extract: async ({ sourceTranscriptId }) => ({
+        extraction: emptyExtraction(sourceTranscriptId),
+        rawResponse: "{}",
+        model: "stub",
+        promptVersion: "stub",
+      }),
     };
 
     await expect(
@@ -436,6 +456,12 @@ describe("diarizing stage", () => {
         model: "whisper-large-v3",
       }),
       diarize,
+      extract: async ({ sourceTranscriptId }) => ({
+        extraction: emptyExtraction(sourceTranscriptId),
+        rawResponse: "{}",
+        model: "stub",
+        promptVersion: "stub",
+      }),
     };
 
     const result = await runLessonPipeline({
