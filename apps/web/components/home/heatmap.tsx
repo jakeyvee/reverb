@@ -32,7 +32,7 @@ export function HeatmapModule({ metrics }: { metrics: HomeMetrics | null }) {
 function UserRow({ user }: { user: HomeUserMetrics }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="w-16 shrink-0 truncate text-xs text-foreground-subtle">
+      <span className="w-12 shrink-0 truncate text-xs text-foreground-subtle sm:w-16">
         {user.isCurrentUser ? "You" : user.displayName}
       </span>
       <div
@@ -62,7 +62,7 @@ function DayHeader({ windowEnd }: { windowEnd: string | null }) {
   const todayIndex = windowEnd ? dayOfWeekIndex(windowEnd) : new Date().getUTCDay();
   return (
     <div className="flex items-center gap-3">
-      <span className="w-16 shrink-0" aria-hidden />
+      <span className="w-12 shrink-0 sm:w-16" aria-hidden />
       <div
         className="grid flex-1 gap-1"
         style={{ gridTemplateColumns: `repeat(${HEATMAP_DAYS}, minmax(0, 1fr))` }}
