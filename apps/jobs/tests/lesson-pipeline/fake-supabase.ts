@@ -22,6 +22,7 @@ type TeacherCorrectionRow = Tables<"teacher_corrections">;
 type ExtractionRunRow = Tables<"extraction_runs">;
 type CardRow = Tables<"cards">;
 type KnownWordRow = Tables<"user_known_words">;
+type TtsAssetRow = Tables<"tts_assets">;
 
 type Filter = { col: string; value: unknown };
 type AnyRow = Record<string, unknown>;
@@ -39,7 +40,8 @@ type TableName =
   | "teacher_corrections"
   | "extraction_runs"
   | "cards"
-  | "user_known_words";
+  | "user_known_words"
+  | "tts_assets";
 
 export class FakeSupabase {
   jobs: JobRow[] = [];
@@ -56,9 +58,21 @@ export class FakeSupabase {
   extractionRuns: ExtractionRunRow[] = [];
   cards: CardRow[] = [];
   knownWords: KnownWordRow[] = [];
+  ttsAssets: TtsAssetRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
+  // Captures the (bucket, path, byteSize, contentType, upsert) tuples for
+  // every uploaded object so TTS tests can assert what landed where.
+  storageUploads: Array<{
+    bucket: string;
+    path: string;
+    byteSize: number;
+    contentType: string | undefined;
+    upsert: boolean | undefined;
+  }> = [];
+  // Toggleable upload failure, used to model a transient storage 503.
+  failNextUpload: { bucket?: string } | null = null;
   // Toggle to simulate a step failure on the n-th update to the jobs table.
   failOnNextUpdate: { whenStatus?: string; count?: number } | null = null;
 
@@ -92,6 +106,8 @@ export class FakeSupabase {
         return new RowsQuery(this, table, this.cards);
       case "user_known_words":
         return new RowsQuery(this, table, this.knownWords);
+      case "tts_assets":
+        return new RowsQuery(this, table, this.ttsAssets);
       default:
         throw new Error(`FakeSupabase: unsupported table ${table}`);
     }
@@ -102,6 +118,28 @@ export class FakeSupabase {
       createSignedUrl: async (path: string, ttl: number) => {
         this.signedUrlRequests.push({ bucket, path, ttl });
         return { data: { signedUrl: `https://fake/${bucket}/${path}?ttl=${ttl}` }, error: null };
+      },
+      upload: async (
+        path: string,
+        body: Buffer | Uint8Array | Blob | ArrayBuffer,
+        opts?: { contentType?: string; upsert?: boolean },
+      ) => {
+        if (
+          this.failNextUpload &&
+          (!this.failNextUpload.bucket || this.failNextUpload.bucket === bucket)
+        ) {
+          this.failNextUpload = null;
+          return { data: null, error: { message: "simulated upload failure" } };
+        }
+        const byteSize = byteLength(body);
+        this.storageUploads.push({
+          bucket,
+          path,
+          byteSize,
+          contentType: opts?.contentType,
+          upsert: opts?.upsert,
+        });
+        return { data: { path }, error: null };
       },
     }),
   };
@@ -123,6 +161,9 @@ export class FakeSupabase {
   }
   insertKnownWord(row: KnownWordRow): void {
     this.knownWords.push({ ...row });
+  }
+  insertTtsAsset(row: TtsAssetRow): void {
+    this.ttsAssets.push({ ...row });
   }
   job(): JobRow {
     const job = this.jobs[0];
@@ -235,6 +276,15 @@ export class FakeSupabase {
         ...row,
       };
     }
+    if (table === "tts_assets") {
+      return {
+        id: row.id ?? randomUUID(),
+        byte_size: null,
+        metadata: {},
+        created_at: now,
+        ...row,
+      };
+    }
     return { ...row };
   }
 
@@ -252,9 +302,7 @@ export class FakeSupabase {
       // `on delete cascade` for both.
       const removedIds = new Set(removed.map((row) => row.id));
       this.cards = this.cards.filter((card) => !removedIds.has(card.vocab_item_id));
-      this.knownWords = this.knownWords.filter(
-        (entry) => !removedIds.has(entry.vocab_item_id),
-      );
+      this.knownWords = this.knownWords.filter((entry) => !removedIds.has(entry.vocab_item_id));
     }
   }
 }
@@ -269,6 +317,14 @@ type Op =
 function matchesIlike(value: string, pattern: string): boolean {
   const literal = pattern.replace(/\\([\\%_])/g, "$1");
   return value.toLocaleLowerCase() === literal.toLocaleLowerCase();
+}
+
+function byteLength(body: Buffer | Uint8Array | Blob | ArrayBuffer): number {
+  if (body instanceof Buffer) return body.byteLength;
+  if (body instanceof Uint8Array) return body.byteLength;
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (typeof Blob !== "undefined" && body instanceof Blob) return body.size;
+  return 0;
 }
 
 class RowsQuery<TRow extends object> {
