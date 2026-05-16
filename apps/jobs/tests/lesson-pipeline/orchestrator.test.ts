@@ -41,6 +41,7 @@ function stubServices(): PipelineServices {
       rawResponse: "{}",
       model: "stub",
       promptVersion: "stub",
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
   };
 }

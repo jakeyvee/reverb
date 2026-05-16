@@ -179,6 +179,7 @@ function fixtureServices(): PipelineServices {
       rawResponse: "{}",
       model: "stub",
       promptVersion: "stub",
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
     // Extraction returns no vocab/grammar/etc - these tests are about the
     // transcribing stage; the empty payload lets the orchestrator finish
@@ -197,6 +198,7 @@ function fixtureServices(): PipelineServices {
       rawResponse: "{}",
       model: "stub",
       promptVersion: "extract-v1",
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
   };
 }
@@ -291,12 +293,14 @@ describe("transcribing stage", () => {
         rawResponse: "{}",
         model: "stub",
         promptVersion: "stub",
+        usage: { inputTokens: 0, outputTokens: 0 },
       }),
       extract: async ({ sourceTranscriptId }) => ({
         extraction: emptyExtraction(sourceTranscriptId),
         rawResponse: "{}",
         model: "stub",
         promptVersion: "stub",
+        usage: { inputTokens: 0, outputTokens: 0 },
       }),
     };
 

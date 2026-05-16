@@ -284,6 +284,7 @@ function buildSteps(): {
         rawResponse: JSON.stringify(validExtraction),
         model: "test-extract-model",
         promptVersion: "extract-v1",
+        usage: { inputTokens: 0, outputTokens: 0 },
       };
     },
     // Default exercise generator: emits five fill-in-the-blank exercises
@@ -459,6 +460,7 @@ describe("runLessonPipeline extraction integration", () => {
         rawResponse: JSON.stringify(dupes),
         model: "test-extract-model",
         promptVersion: "extract-v1",
+        usage: { inputTokens: 0, outputTokens: 0 },
       };
     };
 
@@ -647,6 +649,7 @@ describe("runLessonPipeline extraction integration", () => {
         rawResponse: JSON.stringify(extraction),
         model: "test-extract-model",
         promptVersion: "extract-v1",
+        usage: { inputTokens: 0, outputTokens: 0 },
       };
     };
 
@@ -886,6 +889,7 @@ describe("runLessonPipeline extraction integration", () => {
         rawResponse: JSON.stringify(bad),
         model: "test-extract-model",
         promptVersion: "extract-v1",
+        usage: { inputTokens: 0, outputTokens: 0 },
       };
     };
 

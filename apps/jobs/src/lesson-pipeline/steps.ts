@@ -305,8 +305,7 @@ async function diarizingStep(ctx: StepContext): Promise<StepResult> {
     });
     throw err;
   }
-  const { diarization, model, promptVersion, rawResponse } = diarizeResult;
-  const usage = diarizeResult.usage ?? { inputTokens: 0, outputTokens: 0 };
+  const { diarization, model, promptVersion, rawResponse, usage } = diarizeResult;
   await services.recordUsage({
     provider: ANTHROPIC_DIARIZATION_PROVIDER_ID,
     operation: "llm",
@@ -1451,8 +1450,7 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
     });
     throw err;
   }
-  const { extraction, model, promptVersion } = extractResult;
-  const extractUsage = extractResult.usage ?? { inputTokens: 0, outputTokens: 0 };
+  const { extraction, model, promptVersion, usage: extractUsage } = extractResult;
   await services.recordUsage({
     provider: ANTHROPIC_EXTRACTION_PROVIDER_ID,
     operation: "llm",
