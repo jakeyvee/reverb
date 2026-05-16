@@ -11,17 +11,33 @@ import {
   type DueVocabCard,
   type SubmitVocabReviewOutput,
 } from "./reviews";
+import { recordSessionItemAnswer, xpForVocabRating } from "@/lib/session/orchestrator";
 
 const SubmitInputSchema = z.object({
   cardId: z.string().uuid(),
   rating: ReviewRatingSchema,
   elapsedMs: z.number().int().nonnegative().optional(),
+  // Optional link back to the practice_session_items row this review was
+  // served from. When provided, the action also bumps the session counters
+  // + appends an item_answered event in the same round-trip. Outside-of-
+  // session reviews (e.g. a future "extra practice" panel) omit it.
+  sessionItemId: z.string().uuid().optional(),
 });
 
 export type SubmitVocabReviewActionInput = z.infer<typeof SubmitInputSchema>;
 
 export type SubmitVocabReviewActionResult =
-  | { ok: true; review: SubmitVocabReviewOutput }
+  | {
+      ok: true;
+      review: SubmitVocabReviewOutput;
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+        xpAwarded: number;
+      };
+    }
   | { ok: false; error: string };
 
 // Server action the session UI hits when the user picks Again/Hard/Good/Easy.
@@ -43,7 +59,35 @@ export async function submitVocabReviewAction(
 
   try {
     const review = await submitVocabReview(supabase, user.id, parsed.data);
-    return { ok: true, review };
+    let sessionSnapshot: Extract<SubmitVocabReviewActionResult, { ok: true }>["session"];
+    if (parsed.data.sessionItemId) {
+      const xpAwarded = xpForVocabRating(parsed.data.rating);
+      try {
+        const recorded = await recordSessionItemAnswer(supabase, user.id, {
+          sessionItemId: parsed.data.sessionItemId,
+          correct: parsed.data.rating !== "again",
+          rating: parsed.data.rating,
+          responseMs: parsed.data.elapsedMs ?? null,
+          xpAwarded,
+          bucket: "card",
+        });
+        sessionSnapshot = {
+          sessionItemId: parsed.data.sessionItemId,
+          sessionXpEarned: recorded.sessionXpEarned,
+          cardsReviewed: recorded.cardsReviewed,
+          exercisesAttempted: recorded.exercisesAttempted,
+          xpAwarded,
+        };
+      } catch (sessionError) {
+        // The card review is persisted regardless — don't fail the action
+        // because we couldn't update the session counters.
+        console.warn(
+          "recordSessionItemAnswer failed for vocab review",
+          sessionError instanceof Error ? sessionError.message : sessionError,
+        );
+      }
+    }
+    return { ok: true, review, session: sessionSnapshot };
   } catch (error) {
     return { ok: false, error: messageOf(error) };
   }

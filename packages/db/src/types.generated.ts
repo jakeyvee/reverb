@@ -259,6 +259,9 @@ export type Database = {
           speaker_low_priority: boolean;
           language: string | null;
           text: string;
+          translation: string | null;
+          translation_language: string | null;
+          translated_at: string | null;
           metadata: Json;
           created_at: string;
         };
@@ -274,6 +277,9 @@ export type Database = {
           speaker_low_priority?: boolean;
           language?: string | null;
           text: string;
+          translation?: string | null;
+          translation_language?: string | null;
+          translated_at?: string | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -289,6 +295,9 @@ export type Database = {
           speaker_low_priority?: boolean;
           language?: string | null;
           text?: string;
+          translation?: string | null;
+          translation_language?: string | null;
+          translated_at?: string | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -1022,6 +1031,7 @@ export type Database = {
           card_id: string | null;
           grammar_exercise_id: string | null;
           dialogue_clip_id: string | null;
+          correction_drill_id: string | null;
           shown_at: string | null;
           answered_at: string | null;
           rating: Database["public"]["Enums"]["review_rating"] | null;
@@ -1038,6 +1048,7 @@ export type Database = {
           card_id?: string | null;
           grammar_exercise_id?: string | null;
           dialogue_clip_id?: string | null;
+          correction_drill_id?: string | null;
           shown_at?: string | null;
           answered_at?: string | null;
           rating?: Database["public"]["Enums"]["review_rating"] | null;
@@ -1054,6 +1065,7 @@ export type Database = {
           card_id?: string | null;
           grammar_exercise_id?: string | null;
           dialogue_clip_id?: string | null;
+          correction_drill_id?: string | null;
           shown_at?: string | null;
           answered_at?: string | null;
           rating?: Database["public"]["Enums"]["review_rating"] | null;
@@ -1088,6 +1100,13 @@ export type Database = {
             columns: ["dialogue_clip_id"];
             isOneToOne: false;
             referencedRelation: "dialogue_clips";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "practice_session_items_correction_drill_id_fkey";
+            columns: ["correction_drill_id"];
+            isOneToOne: false;
+            referencedRelation: "correction_drills";
             referencedColumns: ["id"];
           },
         ];
@@ -1600,6 +1619,152 @@ export type Database = {
           },
         ];
       };
+      scenario_sessions: {
+        Row: {
+          id: string;
+          user_id: string;
+          scenario_id: string;
+          level: string;
+          status: string;
+          xp_earned: number;
+          total_messages: number;
+          total_user_messages: number;
+          last_message_at: string | null;
+          completed_at: string | null;
+          abandoned_at: string | null;
+          metadata: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          scenario_id: string;
+          level?: string;
+          status?: string;
+          xp_earned?: number;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          completed_at?: string | null;
+          abandoned_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          scenario_id?: string;
+          level?: string;
+          status?: string;
+          xp_earned?: number;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          completed_at?: string | null;
+          abandoned_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      scenario_messages: {
+        Row: {
+          id: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
+          user_id?: string;
+          role?: Database["public"]["Enums"]["chat_message_role"];
+          content?: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "scenario_messages_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      scenario_corrections: {
+        Row: {
+          id: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          message_id?: string;
+          session_id?: string;
+          user_id?: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text?: string;
+          corrected_text?: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "scenario_corrections_message_id_fkey";
+            columns: ["message_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_messages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "scenario_corrections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       provider_usage_monthly: {
@@ -1651,6 +1816,14 @@ export type Database = {
         };
         Returns: undefined;
       };
+      bump_scenario_session_counters: {
+        Args: {
+          p_session_id: string;
+          p_message_increment?: number;
+          p_user_message_increment?: number;
+        };
+        Returns: undefined;
+      };
     };
     Enums: {
       lesson_status: "draft" | "uploading" | "processing" | "ready" | "failed" | "archived";
@@ -1683,7 +1856,7 @@ export type Database = {
       grammar_exercise_kind: "fill_blank" | "multiple_choice" | "translate" | "reorder";
       teacher_correction_kind: "grammar" | "vocabulary" | "pronunciation" | "usage";
       practice_session_status: "active" | "completed" | "abandoned";
-      practice_item_kind: "card" | "grammar_exercise" | "dialogue_clip";
+      practice_item_kind: "card" | "grammar_exercise" | "dialogue_clip" | "mistake_drill";
       practice_event_kind:
         | "session_start"
         | "session_complete"

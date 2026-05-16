@@ -10,6 +10,7 @@ import type { TablesInsert } from "@reverb/db/types";
 import { requireUser } from "@/lib/auth/get-user";
 import { getProfile } from "@/lib/auth/get-profile";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { recordSessionItemAnswer } from "@/lib/session/orchestrator";
 
 // Server actions for VOL-136's lightweight overrides:
 //
@@ -27,11 +28,29 @@ import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 const MarkKnownInputSchema = z.object({
   vocabItemId: z.string().uuid(),
+  // Optional session-item link. When the override is fired from inside the
+  // daily session runner, this is the row we must also mark answered so
+  // (a) the runner advances past the item without wrapping back, and
+  // (b) `completeSession` doesn't refuse the finish call because of an
+  // orphaned `answered_at IS NULL` row. The cards FK falls to NULL via
+  // `on delete set null` when the underlying card is removed below, which
+  // would otherwise leave the session item unfinishable.
+  sessionItemId: z.string().uuid().optional(),
 });
 
 export type MarkVocabKnownInput = z.infer<typeof MarkKnownInputSchema>;
 export type MarkVocabKnownResult =
-  | { ok: true; cardRemoved: boolean }
+  | {
+      ok: true;
+      cardRemoved: boolean;
+      // Set only when the action also recorded a session-item skip.
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
+    }
   | { ok: false; error: string };
 
 export async function markVocabKnownAction(
@@ -75,10 +94,47 @@ export async function markVocabKnownAction(
     return { ok: false, error: "Could not remove the card." };
   }
 
+  // If the override was fired from inside an active session, mark the
+  // matching `practice_session_items` row answered now. Otherwise the row
+  // sits with `answered_at IS NULL` forever — the runner can't advance
+  // past it (its completedIds set rebuilds from the DB row each time) and
+  // `completeSession` refuses to finalise the session. We record this as
+  // `item_skipped` with zero XP since the user didn't grade themselves;
+  // bucket stays `card` so cards_reviewed still reflects the queue size.
+  let sessionSnapshot: Extract<MarkVocabKnownResult, { ok: true }>["session"];
+  if (parsed.data.sessionItemId) {
+    try {
+      const recorded = await recordSessionItemAnswer(supabase, user.id, {
+        sessionItemId: parsed.data.sessionItemId,
+        correct: null,
+        rating: null,
+        responseMs: null,
+        xpAwarded: 0,
+        bucket: "card",
+        eventKind: "item_skipped",
+        eventPayload: { source: "known", vocab_item_id: parsed.data.vocabItemId },
+      });
+      sessionSnapshot = {
+        sessionItemId: parsed.data.sessionItemId,
+        sessionXpEarned: recorded.sessionXpEarned,
+        cardsReviewed: recorded.cardsReviewed,
+        exercisesAttempted: recorded.exercisesAttempted,
+      };
+    } catch (sessionError) {
+      // Card removal is already persisted — don't unwind for a session
+      // bookkeeping error. The runner can still advance via its local
+      // `answeredHere` set even if the DB row stayed null.
+      console.warn(
+        "recordSessionItemAnswer failed for known-word skip",
+        sessionError instanceof Error ? sessionError.message : sessionError,
+      );
+    }
+  }
+
   revalidatePath("/session");
   revalidatePath("/");
 
-  return { ok: true, cardRemoved: (removed?.length ?? 0) > 0 };
+  return { ok: true, cardRemoved: (removed?.length ?? 0) > 0, session: sessionSnapshot };
 }
 
 const FlagInputSchema = ExtractionFlagInputSchema;
