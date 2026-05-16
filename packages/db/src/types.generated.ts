@@ -1265,6 +1265,59 @@ export type Database = {
           },
         ];
       };
+      tts_assets: {
+        Row: {
+          id: string;
+          household_id: string;
+          text_hash: string;
+          text: string;
+          language_code: string;
+          voice_name: string;
+          provider: string;
+          storage_bucket: string;
+          storage_path: string;
+          byte_size: number | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id: string;
+          text_hash: string;
+          text: string;
+          language_code: string;
+          voice_name: string;
+          provider: string;
+          storage_bucket: string;
+          storage_path: string;
+          byte_size?: number | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string;
+          text_hash?: string;
+          text?: string;
+          language_code?: string;
+          voice_name?: string;
+          provider?: string;
+          storage_bucket?: string;
+          storage_path?: string;
+          byte_size?: number | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "tts_assets_household_id_fkey";
+            columns: ["household_id"];
+            isOneToOne: false;
+            referencedRelation: "households";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
