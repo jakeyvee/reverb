@@ -222,6 +222,24 @@ function buildSteps(promptVersion: string): {
       model: `model-${promptVersion}`,
       promptVersion,
     }),
+    generateGrammarExercises: async (input) => ({
+      output: {
+        schemaVersion: SCHEMA_VERSIONS.grammarExercise,
+        promptVersion: `grammar-ex-${promptVersion}`,
+        patternId: input.patternId,
+        language: input.language,
+        exercises: Array.from({ length: 5 }, () => ({
+          kind: "fill_blank" as const,
+          prompt: "Saya ___ kopi.",
+          answer: "mau",
+          acceptedAnswers: ["mau"],
+          explanation: "`mau` expresses desire.",
+        })),
+      },
+      rawResponse: "{}",
+      model: `grammar-model-${promptVersion}`,
+      promptVersion: `grammar-ex-${promptVersion}`,
+    }),
     synthesize: async (input) => Buffer.from(`audio:${input.text}`, "utf8"),
     emailer: {
       sendReady: async () => ({ ok: true, messageId: "msg" }),

@@ -4,6 +4,11 @@ import { classifyCorrectionConfidence } from "@reverb/domain/schemas/correction-
 import { loadDueVocabReviewCards, type ReviewableVocabCard } from "./vocab-review";
 import type { CorrectionDrillView } from "./correction-drills";
 import { ensureCorrectionDrillsForUser } from "./correction-drills";
+import {
+  loadGrammarExercisesByIds,
+  loadNextGrammarExercise,
+  type SessionGrammarExercise,
+} from "./grammar-exercises";
 
 // VOL-121: Daily session orchestrator.
 //
@@ -36,20 +41,30 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 }
 
 // Pure assembly of the queue order. Pulled out so the rule (mistake drills
-// always slot ahead of vocab, ordering inside each kind is preserved from
-// the loader) lives in one testable place.
+// always slot ahead of grammar, grammar before vocab, ordering inside each
+// kind is preserved from the loader) lives in one testable place.
+//
+// VOL-129 added the grammar slot. We aim for one grammar exercise per
+// session, inserted between mistake drills and vocab reviews so it never
+// blocks the user's most important correction practice.
 export type AssembledItem =
   | { kind: "mistake_drill"; correctionDrillId: string }
+  | { kind: "grammar_exercise"; grammarExerciseId: string }
   | { kind: "card"; cardId: string };
 
 export function assembleSessionQueue(args: {
   corrections: ReadonlyArray<{ drillId: string }>;
+  grammarExercises: ReadonlyArray<{ exerciseId: string }>;
   vocabCards: ReadonlyArray<{ cardId: string }>;
 }): AssembledItem[] {
   return [
     ...args.corrections.map<AssembledItem>((drill) => ({
       kind: "mistake_drill",
       correctionDrillId: drill.drillId,
+    })),
+    ...args.grammarExercises.map<AssembledItem>((exercise) => ({
+      kind: "grammar_exercise",
+      grammarExerciseId: exercise.exerciseId,
     })),
     ...args.vocabCards.map<AssembledItem>((card) => ({
       kind: "card",
@@ -69,6 +84,15 @@ export type SessionItem =
       kind: "mistake_drill";
       completed: boolean;
       drill: CorrectionDrillView;
+    }
+  | {
+      sessionItemId: string;
+      position: number;
+      kind: "grammar_exercise";
+      completed: boolean;
+      // The grader runs client-side against this hydrated copy and the
+      // server action re-validates by re-loading from the DB on submit.
+      exercise: SessionGrammarExercise;
     }
   | {
       sessionItemId: string;
@@ -130,24 +154,20 @@ export async function startOrResumeTodaysSession(
     // queue stay in place.
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
-      const { drills, vocabCards } = await loadCandidateQueue(supabase, userId, {
+      const { drills, grammarExercise, vocabCards } = await loadCandidateQueue(supabase, userId, {
         now,
         drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
         vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
       });
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
+        grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
         vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
       });
       if (assembled.length > 0) {
-        const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) => ({
-          session_id: existing.id,
-          user_id: userId,
-          position: index,
-          kind: item.kind,
-          card_id: item.kind === "card" ? item.cardId : null,
-          correction_drill_id: item.kind === "mistake_drill" ? item.correctionDrillId : null,
-        }));
+        const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
+          buildSessionItemRow(existing.id, userId, index, item),
+        );
         const { error } = await supabase.from("practice_session_items").insert(itemRows);
         if (error) {
           throw new Error(`Could not top up practice_session_items: ${error.message}`);
@@ -163,7 +183,7 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, vocabCards } = await loadCandidateQueue(supabase, userId, {
+  const { drills, grammarExercise, vocabCards } = await loadCandidateQueue(supabase, userId, {
     now,
     drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
     vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
@@ -171,6 +191,7 @@ export async function startOrResumeTodaysSession(
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
+    grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
     vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
   });
 
@@ -194,14 +215,9 @@ export async function startOrResumeTodaysSession(
   }
 
   if (assembled.length > 0) {
-    const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) => ({
-      session_id: insertedSession.id,
-      user_id: userId,
-      position: index,
-      kind: item.kind,
-      card_id: item.kind === "card" ? item.cardId : null,
-      correction_drill_id: item.kind === "mistake_drill" ? item.correctionDrillId : null,
-    }));
+    const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
+      buildSessionItemRow(insertedSession.id, userId, index, item),
+    );
     const { error: itemsError } = await supabase.from("practice_session_items").insert(itemRows);
     if (itemsError) {
       throw new Error(`Could not seed practice_session_items: ${itemsError.message}`);
@@ -253,9 +269,13 @@ async function loadCandidateQueue(
   supabase: SupabaseClient<Database>,
   userId: string,
   args: { now: Date; drillLimit: number; vocabLimit: number },
-): Promise<{ drills: CorrectionDrillView[]; vocabCards: ReviewableVocabCard[] }> {
+): Promise<{
+  drills: CorrectionDrillView[];
+  grammarExercise: SessionGrammarExercise | null;
+  vocabCards: ReviewableVocabCard[];
+}> {
   const nowIso = args.now.toISOString();
-  const [drillResp, vocab] = await Promise.all([
+  const [drillResp, vocab, grammarExercise] = await Promise.all([
     supabase
       .from("correction_drills")
       .select(
@@ -267,6 +287,10 @@ async function loadCandidateQueue(
       .order("due_at", { ascending: true })
       .limit(args.drillLimit * 2),
     loadDueVocabReviewCards(supabase, userId, { now: args.now, limit: args.vocabLimit }),
+    // One grammar exercise per session — `loadNextGrammarExercise` returns
+    // the most recent unseen one (or null if the user has no eligible
+    // exercises, in which case we just skip the slot).
+    loadNextGrammarExercise(supabase, userId),
   ]);
   if (drillResp.error) {
     throw new Error(`Could not load drill candidates: ${drillResp.error.message}`);
@@ -301,7 +325,28 @@ async function loadCandidateQueue(
       confidenceTier: tier,
     });
   }
-  return { drills, vocabCards: vocab };
+  return { drills, grammarExercise, vocabCards: vocab };
+}
+
+// Build a single `practice_session_items` insert payload for one
+// AssembledItem. Centralised because each kind has its own FK column and
+// the check constraint on the table requires exactly one of them set —
+// it's easy to forget which kind nulls which when assembling rows inline.
+function buildSessionItemRow(
+  sessionId: string,
+  userId: string,
+  position: number,
+  item: AssembledItem,
+): TablesInsert<"practice_session_items"> {
+  return {
+    session_id: sessionId,
+    user_id: userId,
+    position,
+    kind: item.kind,
+    card_id: item.kind === "card" ? item.cardId : null,
+    correction_drill_id: item.kind === "mistake_drill" ? item.correctionDrillId : null,
+    grammar_exercise_id: item.kind === "grammar_exercise" ? item.grammarExerciseId : null,
+  };
 }
 
 // Hydrate a session row + its items into the view model the UI consumes.
@@ -316,7 +361,7 @@ async function hydrateSession(
   const { data: itemRows, error: itemsError } = await supabase
     .from("practice_session_items")
     .select(
-      "id, position, kind, card_id, correction_drill_id, answered_at, rating, correct, response_ms",
+      "id, position, kind, card_id, correction_drill_id, grammar_exercise_id, answered_at, rating, correct, response_ms",
     )
     .eq("session_id", session.id)
     .order("position", { ascending: true });
@@ -326,17 +371,23 @@ async function hydrateSession(
   const rows = itemRows ?? [];
   const drillIds: string[] = [];
   const cardIds: string[] = [];
+  const grammarExerciseIds: string[] = [];
   for (const row of rows) {
     if (row.kind === "mistake_drill" && row.correction_drill_id) {
       drillIds.push(row.correction_drill_id);
     } else if (row.kind === "card" && row.card_id) {
       cardIds.push(row.card_id);
+    } else if (row.kind === "grammar_exercise" && row.grammar_exercise_id) {
+      grammarExerciseIds.push(row.grammar_exercise_id);
     }
   }
 
-  const [drillsById, cardsById] = await Promise.all([
+  const [drillsById, cardsById, grammarById] = await Promise.all([
     drillIds.length > 0 ? loadDrillsByIds(supabase, userId, drillIds) : new Map(),
     cardIds.length > 0 ? loadCardsByIds(supabase, userId, cardIds) : new Map(),
+    grammarExerciseIds.length > 0
+      ? loadGrammarExercisesByIds(supabase, grammarExerciseIds)
+      : new Map<string, SessionGrammarExercise>(),
   ]);
 
   const items: SessionItem[] = [];
@@ -368,11 +419,24 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         card,
       });
+    } else if (row.kind === "grammar_exercise") {
+      const exercise = row.grammar_exercise_id
+        ? grammarById.get(row.grammar_exercise_id)
+        : undefined;
+      if (!exercise) {
+        unresolved += 1;
+        continue;
+      }
+      items.push({
+        sessionItemId: row.id,
+        position: row.position,
+        kind: "grammar_exercise",
+        completed: row.answered_at !== null,
+        exercise,
+      });
     } else {
-      // Unknown kind (grammar_exercise / dialogue_clip placeholders). The
-      // orchestrator currently emits only `card` and `mistake_drill`, so an
-      // unknown row is data drift — drop it from the queue rather than
-      // failing the whole page.
+      // Unknown kind (dialogue_clip placeholders, future kinds). Drop from
+      // the queue rather than failing the whole page.
       unresolved += 1;
     }
   }

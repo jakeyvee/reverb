@@ -286,6 +286,30 @@ function buildSteps(): {
         promptVersion: "extract-v1",
       };
     },
+    // Default exercise generator: emits five fill-in-the-blank exercises
+    // per pattern so the validator's threshold is met. Tests that need
+    // specific behaviour override this on a per-case basis.
+    generateGrammarExercises: async (input) => {
+      const exercises = Array.from({ length: 5 }, (_, idx) => ({
+        kind: "fill_blank" as const,
+        prompt: `Saya ___ kopi #${idx + 1}.`,
+        answer: "mau",
+        acceptedAnswers: ["mau"],
+        explanation: "`mau` expresses desire.",
+      }));
+      return {
+        output: {
+          schemaVersion: SCHEMA_VERSIONS.grammarExercise,
+          promptVersion: "grammar-ex-test",
+          patternId: input.patternId,
+          language: input.language,
+          exercises,
+        },
+        rawResponse: "{}",
+        model: "grammar-ex-test-model",
+        promptVersion: "grammar-ex-test",
+      };
+    },
     // The dialogue clip the extraction emits sits inside the seeded lesson
     // duration (3s), so materialization actually runs — provide a fake ffmpeg
     // runner so the step does not try to spawn a real binary.
@@ -712,6 +736,126 @@ describe("runLessonPipeline extraction integration", () => {
     // Cards are stable across retries — same ids, no duplicates.
     expect(supabase.cards).toHaveLength(2);
     expect(supabase.cards.map((c) => c.id).sort()).toEqual(firstCardIds);
+  });
+
+  it("generates and persists grammar exercises for each detected pattern", async () => {
+    const supabase = new FakeSupabase();
+    seed(supabase);
+    const { steps, services } = buildSteps();
+    const capturedGeneratorInputs: Array<{ patternId: string; pattern: string }> = [];
+
+    services.generateGrammarExercises = async (input) => {
+      capturedGeneratorInputs.push({ patternId: input.patternId, pattern: input.pattern });
+      // Five valid + one rejected (missing placeholder) — exercises the
+      // validator's "drop bad items without failing the lesson" path.
+      const exercises = [
+        {
+          kind: "fill_blank" as const,
+          prompt: "Saya ___ kopi.",
+          answer: "mau",
+          acceptedAnswers: ["mau"],
+          explanation: "`mau` expresses desire.",
+        },
+        {
+          kind: "multiple_choice" as const,
+          prompt: "Choose the meaning of 'mau':",
+          answer: "want",
+          choices: ["want", "have", "go", "see"],
+          explanation: "`mau` = want.",
+        },
+        {
+          kind: "transform" as const,
+          prompt: "Add `tidak` to negate: 'Saya mau kopi.'",
+          answer: "Saya tidak mau kopi.",
+          acceptedAnswers: ["Saya tidak mau kopi"],
+          explanation: "`tidak` negates non-stative verbs.",
+        },
+        {
+          kind: "fill_blank" as const,
+          prompt: "Dia ___ pergi.",
+          answer: "mau",
+          acceptedAnswers: ["mau"],
+          explanation: "...",
+        },
+        {
+          kind: "fill_blank" as const,
+          prompt: "Kami ___ makan.",
+          answer: "mau",
+          acceptedAnswers: ["mau"],
+          explanation: "...",
+        },
+        // Invalid — no placeholder. Should be dropped without failing.
+        {
+          kind: "fill_blank" as const,
+          prompt: "No placeholder here.",
+          answer: "mau",
+          acceptedAnswers: [],
+          explanation: "...",
+        },
+      ];
+      return {
+        output: {
+          schemaVersion: SCHEMA_VERSIONS.grammarExercise,
+          promptVersion: "grammar-ex-test",
+          patternId: input.patternId,
+          language: input.language,
+          exercises,
+        },
+        rawResponse: "{}",
+        model: "grammar-ex-test-model",
+        promptVersion: "grammar-ex-test",
+      };
+    };
+
+    const result = await runLessonPipeline({
+      supabase: asClient(supabase),
+      payload: { lessonId: LESSON_ID },
+      triggerRunId: "run_grammar_ok",
+      logger: noopLogger,
+      steps,
+      services,
+    });
+
+    expect(result.status).toBe("ready");
+    expect(capturedGeneratorInputs).toHaveLength(1);
+    expect(capturedGeneratorInputs[0]).toMatchObject({ pattern: "mau + noun" });
+
+    // 5 valid items survived validation, 1 was rejected.
+    expect(supabase.grammarExercises).toHaveLength(5);
+    for (const exercise of supabase.grammarExercises) {
+      expect(exercise.grammar_pattern_id).toBe(supabase.grammarPatterns[0]!.id);
+      expect(exercise.household_id).toBe(HOUSEHOLD_ID);
+      expect(exercise.lesson_id).toBe(LESSON_ID);
+      expect(exercise.prompt_version).toBe("grammar-ex-test");
+    }
+    // Mix of kinds emitted, not just one.
+    const kinds = new Set(supabase.grammarExercises.map((e) => e.kind));
+    expect(kinds.size).toBeGreaterThan(1);
+  });
+
+  it("survives a generator failure for a pattern and still completes the lesson", async () => {
+    const supabase = new FakeSupabase();
+    seed(supabase);
+    const { steps, services } = buildSteps();
+
+    services.generateGrammarExercises = async () => {
+      throw new Error("simulated generator outage");
+    };
+
+    const result = await runLessonPipeline({
+      supabase: asClient(supabase),
+      payload: { lessonId: LESSON_ID },
+      triggerRunId: "run_grammar_fail",
+      logger: noopLogger,
+      steps,
+      services,
+    });
+
+    // Pipeline completes despite the per-pattern failure, and no exercise
+    // rows landed for the failing pattern.
+    expect(result.status).toBe("ready");
+    expect(supabase.grammarPatterns).toHaveLength(1);
+    expect(supabase.grammarExercises).toHaveLength(0);
   });
 
   it("fails before writing derived rows when extraction references a missing segment", async () => {

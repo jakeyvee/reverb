@@ -768,7 +768,9 @@ export type Database = {
           prompt: string;
           answer: string;
           choices: Json;
+          accepted_answers: Json;
           explanation: string | null;
+          prompt_version: string | null;
           metadata: Json;
           created_at: string;
           updated_at: string;
@@ -782,7 +784,9 @@ export type Database = {
           prompt: string;
           answer: string;
           choices?: Json;
+          accepted_answers?: Json;
           explanation?: string | null;
+          prompt_version?: string | null;
           metadata?: Json;
           created_at?: string;
           updated_at?: string;
@@ -796,7 +800,9 @@ export type Database = {
           prompt?: string;
           answer?: string;
           choices?: Json;
+          accepted_answers?: Json;
           explanation?: string | null;
+          prompt_version?: string | null;
           metadata?: Json;
           created_at?: string;
           updated_at?: string;
@@ -1578,7 +1584,12 @@ export type Database = {
         | "other";
       card_state: "new" | "learning" | "review" | "relearning";
       review_rating: "again" | "hard" | "good" | "easy";
-      grammar_exercise_kind: "fill_blank" | "multiple_choice" | "translate" | "reorder";
+      grammar_exercise_kind:
+        | "fill_blank"
+        | "multiple_choice"
+        | "translate"
+        | "reorder"
+        | "transform";
       teacher_correction_kind: "grammar" | "vocabulary" | "pronunciation" | "usage";
       practice_session_status: "active" | "completed" | "abandoned";
       practice_item_kind: "card" | "grammar_exercise" | "dialogue_clip" | "mistake_drill";
