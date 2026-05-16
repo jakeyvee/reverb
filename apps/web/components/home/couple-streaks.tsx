@@ -7,6 +7,7 @@ export function CoupleStreaksModule({ metrics }: { metrics: HomeMetrics | null }
   const currentUser = users.find((u) => u.isCurrentUser) ?? users[0] ?? null;
   const partner = users.find((u) => !u.isCurrentUser) ?? null;
 
+  const freePassRemaining = currentUser?.freePassRemaining ?? 0;
   return (
     <Card>
       <SectionHeader title="Couple streaks" description={describe(currentUser, partner)} />
@@ -24,8 +25,13 @@ export function CoupleStreaksModule({ metrics }: { metrics: HomeMetrics | null }
           isCurrentUser={false}
         />
       </div>
+      <p className="mt-3 text-xs text-foreground-subtle">
+        {freePassRemaining > 0
+          ? "Free-pass available this month — one missed day won't break the streak if you both miss."
+          : "Free-pass used this month — practice today to keep the streak going."}
+      </p>
       {!partner ? (
-        <p className="mt-3 text-xs text-foreground-subtle">
+        <p className="mt-1 text-xs text-foreground-subtle">
           Invite a partner from your profile to start a shared streak.
         </p>
       ) : null}
@@ -33,10 +39,7 @@ export function CoupleStreaksModule({ metrics }: { metrics: HomeMetrics | null }
   );
 }
 
-function describe(
-  currentUser: HomeUserMetrics | null,
-  partner: HomeUserMetrics | null,
-): string {
+function describe(currentUser: HomeUserMetrics | null, partner: HomeUserMetrics | null): string {
   if (!currentUser) return "You + your partner, in sync";
   if (!partner) return `Solo for now — ${currentUser.currentStreak}d streak`;
   if (currentUser.practicedToday && partner.practicedToday) {
@@ -73,9 +76,7 @@ function StreakBlock({
         <FlameIcon width={18} height={18} />
       </span>
       <div className="min-w-0">
-        <p className="truncate text-xs text-foreground-subtle">
-          {isCurrentUser ? "You" : label}
-        </p>
+        <p className="truncate text-xs text-foreground-subtle">{isCurrentUser ? "You" : label}</p>
         <p className="text-sm font-semibold">
           {days} <span className="text-xs font-normal text-foreground-subtle">days</span>
         </p>

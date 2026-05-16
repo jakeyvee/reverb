@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { renderLessonFailedEmail, renderLessonReadyEmail } from "../src/templates.js";
+import {
+  renderLessonFailedEmail,
+  renderLessonReadyEmail,
+  renderStreakReminderEmail,
+} from "../src/templates.js";
 
 const ORIGINAL_APP_URL = process.env.APP_URL;
 
@@ -97,5 +101,53 @@ describe("renderLessonFailedEmail", () => {
     expect(rendered.html).not.toContain("What went wrong");
     expect(rendered.html).not.toContain("Stage:");
     expect(rendered.text).not.toContain("Stage:");
+  });
+});
+
+describe("renderStreakReminderEmail", () => {
+  it("includes the streak length, practice link, and free-pass hint when available", () => {
+    const rendered = renderStreakReminderEmail({
+      displayName: "Alex",
+      currentStreak: 12,
+      freePassRemaining: true,
+    });
+    expect(rendered.subject).toContain("12-day streak");
+    expect(rendered.html).toContain("Alex");
+    expect(rendered.html).toContain("12-day");
+    expect(rendered.html).toContain("https://app.example.test/session");
+    expect(rendered.html).toContain("free-pass");
+    expect(rendered.text).toContain("Alex");
+    expect(rendered.text).toContain("12-day");
+    expect(rendered.text).toContain("https://app.example.test/session");
+  });
+
+  it("omits the free-pass hint when the token is already spent", () => {
+    const rendered = renderStreakReminderEmail({
+      displayName: "Alex",
+      currentStreak: 3,
+      freePassRemaining: false,
+    });
+    expect(rendered.html).not.toContain("free-pass");
+    expect(rendered.text).not.toContain("free-pass");
+  });
+
+  it("escapes the display name so a hostile profile can't inject HTML", () => {
+    const rendered = renderStreakReminderEmail({
+      displayName: `<img src=x onerror="alert(1)">`,
+      currentStreak: 1,
+      freePassRemaining: false,
+    });
+    expect(rendered.html).not.toContain("<img");
+    expect(rendered.html).toContain("&lt;img");
+  });
+
+  it("uses a softer subject + body when the streak is zero", () => {
+    const rendered = renderStreakReminderEmail({
+      displayName: "Bo",
+      currentStreak: 0,
+      freePassRemaining: true,
+    });
+    expect(rendered.subject).not.toContain("0-day");
+    expect(rendered.html).toContain("put a streak");
   });
 });

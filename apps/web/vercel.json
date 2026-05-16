@@ -3,5 +3,11 @@
   "framework": "nextjs",
   "buildCommand": "cd ../.. && pnpm turbo run build --filter=@reverb/web",
   "installCommand": "pnpm install --frozen-lockfile",
-  "ignoreCommand": "npx turbo-ignore @reverb/web"
+  "ignoreCommand": "npx turbo-ignore @reverb/web",
+  "crons": [
+    {
+      "path": "/api/cron/streak-reminders",
+      "schedule": "0 * * * *"
+    }
+  ]
 }

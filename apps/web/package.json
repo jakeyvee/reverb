@@ -18,6 +18,7 @@
     "@reverb/ai": "workspace:*",
     "@reverb/db": "workspace:*",
     "@reverb/domain": "workspace:*",
+    "@reverb/email": "workspace:*",
     "@reverb/srs": "workspace:*",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.47.10",
