@@ -1,6 +1,12 @@
 import type { Route } from "next";
 import type { ReactNode } from "react";
-import { ChatIcon, HomeIcon, LessonsIcon, ProfileIcon } from "@/components/ui/icons";
+import {
+  ChatIcon,
+  HomeIcon,
+  LessonsIcon,
+  MapPinIcon,
+  ProfileIcon,
+} from "@/components/ui/icons";
 
 export type NavItem = {
   href: Route;
@@ -12,5 +18,6 @@ export const PRIMARY_NAV: NavItem[] = [
   { href: "/" as Route, label: "Home", icon: <HomeIcon /> },
   { href: "/lessons" as Route, label: "Lessons", icon: <LessonsIcon /> },
   { href: "/chat" as Route, label: "Chat", icon: <ChatIcon /> },
+  { href: "/scenarios" as Route, label: "Scenarios", icon: <MapPinIcon /> },
   { href: "/profile" as Route, label: "Profile", icon: <ProfileIcon /> },
 ];

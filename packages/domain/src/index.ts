@@ -16,3 +16,4 @@ export * from "./schemas/lesson-status.js";
 export * from "./schemas/notifications.js";
 export * from "./schemas/chat.js";
 export * from "./schemas/extraction-flag.js";
+export * from "./schemas/scenario.js";
