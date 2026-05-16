@@ -150,3 +150,36 @@ create policy "chat_corrections_insert_self" on public.chat_corrections
         and m.user_id = auth.uid()
     )
   );
+
+-- Atomic counter bump for a finished round-trip. The web action would
+-- otherwise have to read total_messages, add 2, and write the sum back —
+-- which races against a concurrent second tab / double-submit and loses
+-- increments. Doing it inside the database removes the read-modify-write
+-- window. RLS still gates this: the function runs as the caller, and the
+-- WHERE clause requires the row's user_id to match auth.uid(), so a client
+-- can't bump another user's counters even if they learned the session id.
+-- p_user_message_increment is 1 for a normal turn and 0 for assistant-only
+-- bumps if we ever introduce them; defaulting it keeps the call site terse.
+create or replace function public.bump_chat_session_counters(
+  p_session_id uuid,
+  p_message_increment integer default 2,
+  p_user_message_increment integer default 1
+)
+returns void
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+begin
+  update public.chat_sessions
+     set total_messages = total_messages + p_message_increment,
+         total_user_messages = total_user_messages + p_user_message_increment,
+         last_message_at = now()
+   where id = p_session_id
+     and user_id = auth.uid();
+end;
+$$;
+
+revoke all on function public.bump_chat_session_counters(uuid, integer, integer) from public;
+grant execute on function public.bump_chat_session_counters(uuid, integer, integer)
+  to authenticated, service_role;

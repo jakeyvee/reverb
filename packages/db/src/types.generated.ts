@@ -1458,6 +1458,14 @@ export type Database = {
         Args: Record<PropertyKey, never>;
         Returns: string;
       };
+      bump_chat_session_counters: {
+        Args: {
+          p_session_id: string;
+          p_message_increment?: number;
+          p_user_message_increment?: number;
+        };
+        Returns: undefined;
+      };
     };
     Enums: {
       lesson_status: "draft" | "uploading" | "processing" | "ready" | "failed" | "archived";

@@ -180,18 +180,17 @@ export async function sendChatMessageAction(
     }
   }
 
-  // Bump counters + last_message_at so the next round-trip can decide
-  // whether to compress the rolling summary without a fresh count(*).
-  const now = new Date().toISOString();
-  const { error: updateError } = await supabase
-    .from("chat_sessions")
-    .update({
-      total_messages: session.total_messages + 2,
-      total_user_messages: session.total_user_messages + 1,
-      last_message_at: now,
-    })
-    .eq("id", session.id)
-    .eq("user_id", user.id);
+  // Bump counters + last_message_at atomically so a concurrent second tab
+  // / double-submit cannot lose an increment via read-modify-write. The
+  // RPC runs as the caller and gates on auth.uid() = user_id so RLS is
+  // still enforced. The summary-trigger threshold (shouldSummarizeHistory)
+  // reads these counters next round-trip, so a lost increment would
+  // misfire it.
+  const { error: updateError } = await supabase.rpc("bump_chat_session_counters", {
+    p_session_id: session.id,
+    p_message_increment: 2,
+    p_user_message_increment: 1,
+  });
   if (updateError) {
     return { ok: false, error: `Could not update session: ${updateError.message}` };
   }
