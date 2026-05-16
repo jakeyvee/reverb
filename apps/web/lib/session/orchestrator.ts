@@ -5,6 +5,11 @@ import { loadDueVocabReviewCards, type ReviewableVocabCard } from "./vocab-revie
 import type { CorrectionDrillView } from "./correction-drills";
 import { ensureCorrectionDrillsForUser } from "./correction-drills";
 import {
+  loadShadowingCandidates,
+  loadShadowingClipsByIds,
+  type ShadowingClipView,
+} from "./shadowing";
+import {
   DEFAULT_LISTENING_LIMIT,
   assignListeningPrompts,
   loadListeningClipCandidates,
@@ -32,6 +37,7 @@ const DEFAULT_VOCAB_LIMIT = 12;
 // budget per session stays modest. Override via StartOrResumeOptions for
 // tests or future tuning.
 const DEFAULT_LISTENING_SESSION_LIMIT = DEFAULT_LISTENING_LIMIT;
+const DEFAULT_SHADOWING_LIMIT = 3;
 
 export const VOCAB_REVIEW_XP_PER_GOOD_RATING = 3;
 // Vocab is awarded by rating. Again rates 0 because the user got it wrong;
@@ -48,18 +54,29 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 }
 
 // Pure assembly of the queue order. Pulled out so the rule (mistake drills
-// always slot ahead of vocab, listening items trail at the end, ordering
-// inside each kind is preserved from the loader) lives in one testable
-// place.
+// always slot ahead of vocab; listening + shadowing trail at the end;
+// ordering inside each kind is preserved from the loader) lives in one
+// testable place.
+//
+// Both listening and shadowing reuse the `dialogue_clip` row kind. They are
+// distinguished by the presence of `metadata.listening`: listening items
+// persist their generated prompt there, shadowing rows leave it null. The
+// hydrator uses that to route each item back to the right runner.
+//
+// Shadowing slots after listening because it's the slowest item per attempt
+// (record + playback + self-mark) — treat it as the optional cool-down at
+// the end of the queue.
 export type AssembledItem =
   | { kind: "mistake_drill"; correctionDrillId: string }
   | { kind: "card"; cardId: string }
-  | { kind: "listening_comprehension"; clipId: string; prompt: ListeningPrompt };
+  | { kind: "listening_comprehension"; clipId: string; prompt: ListeningPrompt }
+  | { kind: "shadowing"; dialogueClipId: string };
 
 export function assembleSessionQueue(args: {
   corrections: ReadonlyArray<{ drillId: string }>;
   vocabCards: ReadonlyArray<{ cardId: string }>;
   listening?: ReadonlyArray<{ clipId: string; prompt: ListeningPrompt }>;
+  shadowingClips?: ReadonlyArray<{ clipId: string }>;
 }): AssembledItem[] {
   return [
     ...args.corrections.map<AssembledItem>((drill) => ({
@@ -74,6 +91,10 @@ export function assembleSessionQueue(args: {
       kind: "listening_comprehension",
       clipId: entry.clipId,
       prompt: entry.prompt,
+    })),
+    ...(args.shadowingClips ?? []).map<AssembledItem>((clip) => ({
+      kind: "shadowing",
+      dialogueClipId: clip.clipId,
     })),
   ];
 }
@@ -103,6 +124,13 @@ export type SessionItem =
       kind: "listening_comprehension";
       completed: boolean;
       listening: ListeningItemView;
+    }
+  | {
+      sessionItemId: string;
+      position: number;
+      kind: "shadowing";
+      completed: boolean;
+      clip: ShadowingClipView;
     };
 
 export type DailySessionView = {
@@ -125,6 +153,7 @@ export type StartOrResumeOptions = {
   drillLimit?: number;
   vocabLimit?: number;
   listeningLimit?: number;
+  shadowingLimit?: number;
 };
 
 // Entry point for the /session page and the "Start Today's Session" CTA.
@@ -158,16 +187,22 @@ export async function startOrResumeTodaysSession(
     // queue stay in place.
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
-      const { drills, vocabCards, listening } = await loadCandidateQueue(supabase, userId, {
-        now,
-        drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
-        vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
-        listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
-      });
+      const { drills, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
+        supabase,
+        userId,
+        {
+          now,
+          drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
+          vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+          listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
+          shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
+        },
+      );
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
         vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
         listening,
+        shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
       });
       if (assembled.length > 0) {
         const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
@@ -188,17 +223,23 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, vocabCards, listening } = await loadCandidateQueue(supabase, userId, {
-    now,
-    drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
-    vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
-    listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
-  });
+  const { drills, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
+    supabase,
+    userId,
+    {
+      now,
+      drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
+      vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+      listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
+      shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
+    },
+  );
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
     vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
     listening,
+    shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
   });
 
   const sessionRow: TablesInsert<"practice_sessions"> = {
@@ -241,6 +282,7 @@ export async function startOrResumeTodaysSession(
         card: assembled.filter((item) => item.kind === "card").length,
         listening_comprehension: assembled.filter((item) => item.kind === "listening_comprehension")
           .length,
+        shadowing: assembled.filter((item) => item.kind === "shadowing").length,
       },
     },
   });
@@ -283,14 +325,21 @@ async function findActiveSessionForDay(
 async function loadCandidateQueue(
   supabase: SupabaseClient<Database>,
   userId: string,
-  args: { now: Date; drillLimit: number; vocabLimit: number; listeningLimit: number },
+  args: {
+    now: Date;
+    drillLimit: number;
+    vocabLimit: number;
+    listeningLimit: number;
+    shadowingLimit: number;
+  },
 ): Promise<{
   drills: CorrectionDrillView[];
   vocabCards: ReviewableVocabCard[];
   listening: Array<{ clipId: string; prompt: ListeningPrompt }>;
+  shadowingClips: ShadowingClipView[];
 }> {
   const nowIso = args.now.toISOString();
-  const [drillResp, vocab, listeningCandidates] = await Promise.all([
+  const [drillResp, vocab, listeningCandidates, shadowing] = await Promise.all([
     supabase
       .from("correction_drills")
       .select(
@@ -303,11 +352,19 @@ async function loadCandidateQueue(
       .limit(args.drillLimit * 2),
     loadDueVocabReviewCards(supabase, userId, { now: args.now, limit: args.vocabLimit }),
     loadListeningClipCandidates(supabase, { limit: Math.max(args.listeningLimit * 3, 6) }),
+    loadShadowingCandidates(supabase, userId, { limit: args.shadowingLimit }),
   ]);
   if (drillResp.error) {
     throw new Error(`Could not load drill candidates: ${drillResp.error.message}`);
   }
-  const listening = assignListeningPrompts(listeningCandidates, {
+  // Don't queue the same clip twice — if a clip is already going out as a
+  // shadowing item, drop it from the listening candidate pool so the user
+  // doesn't see the same audio back-to-back under two different prompts.
+  const shadowingClipIds = new Set(shadowing.map((s) => s.clipId));
+  const filteredListeningCandidates = listeningCandidates.filter(
+    (c) => !shadowingClipIds.has(c.clipId),
+  );
+  const listening = assignListeningPrompts(filteredListeningCandidates, {
     limit: args.listeningLimit,
   }).map((entry) => ({ clipId: entry.clip.clipId, prompt: entry.prompt }));
   const drills: CorrectionDrillView[] = [];
@@ -340,13 +397,15 @@ async function loadCandidateQueue(
       confidenceTier: tier,
     });
   }
-  return { drills, vocabCards: vocab, listening };
+  return { drills, vocabCards: vocab, listening, shadowingClips: shadowing };
 }
 
 // Maps an assembled item into the practice_session_items insert row. The
 // kind column lines up with the per-item FK as enforced by
-// enforce_practice_session_item_target; listening items reuse the
-// `dialogue_clip` kind + FK and carry the generated prompt in `metadata`.
+// enforce_practice_session_item_target. Both listening and shadowing reuse
+// the `dialogue_clip` kind + FK; listening items carry the generated prompt
+// in `metadata.listening`, shadowing items leave `metadata` null. The
+// hydrator uses that distinction to pick which runner view to build.
 function buildSessionItemInsert(
   sessionId: string,
   userId: string,
@@ -379,6 +438,14 @@ function buildSessionItemInsert(
         dialogue_clip_id: item.clipId,
         metadata: { listening: item.prompt },
       };
+    case "shadowing":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "dialogue_clip",
+        dialogue_clip_id: item.dialogueClipId,
+      };
   }
 }
 
@@ -404,29 +471,50 @@ async function hydrateSession(
   const rows = itemRows ?? [];
   const drillIds: string[] = [];
   const cardIds: string[] = [];
+  // Dialogue-clip rows split between shadowing and listening based on
+  // whether `metadata.listening` is populated. Two id buckets so each
+  // loader only signs URLs for the clips it actually needs.
   const listeningClipIds: string[] = [];
+  const shadowingClipIds: string[] = [];
+  type RowKind = "mistake_drill" | "card" | "listening_comprehension" | "shadowing";
+  const rowKinds = new Map<string, RowKind>();
   for (const row of rows) {
     if (row.kind === "mistake_drill" && row.correction_drill_id) {
       drillIds.push(row.correction_drill_id);
+      rowKinds.set(row.id, "mistake_drill");
     } else if (row.kind === "card" && row.card_id) {
       cardIds.push(row.card_id);
+      rowKinds.set(row.id, "card");
     } else if (row.kind === "dialogue_clip" && row.dialogue_clip_id) {
-      listeningClipIds.push(row.dialogue_clip_id);
+      // Listening rows always carry `metadata.listening`; shadowing rows
+      // were inserted with metadata=null. A row that has neither (old data,
+      // or an external insert) falls through to shadowing — that runner
+      // tolerates missing audio more gracefully than the listening one.
+      const prompt = parseListeningPromptFromMetadata(row.metadata);
+      if (prompt) {
+        listeningClipIds.push(row.dialogue_clip_id);
+        rowKinds.set(row.id, "listening_comprehension");
+      } else {
+        shadowingClipIds.push(row.dialogue_clip_id);
+        rowKinds.set(row.id, "shadowing");
+      }
     }
   }
 
-  const [drillsById, cardsById, listeningById] = await Promise.all([
+  const [drillsById, cardsById, listeningById, shadowingById] = await Promise.all([
     drillIds.length > 0 ? loadDrillsByIds(supabase, userId, drillIds) : new Map(),
     cardIds.length > 0 ? loadCardsByIds(supabase, userId, cardIds) : new Map(),
     listeningClipIds.length > 0
       ? loadListeningClipsByIds(supabase, listeningClipIds)
       : new Map<string, ListeningClipHydration>(),
+    shadowingClipIds.length > 0 ? loadShadowingClipsByIds(supabase, shadowingClipIds) : new Map(),
   ]);
 
   const items: SessionItem[] = [];
   let unresolved = 0;
   for (const row of rows) {
-    if (row.kind === "mistake_drill") {
+    const resolvedKind = rowKinds.get(row.id);
+    if (resolvedKind === "mistake_drill") {
       const drill = row.correction_drill_id ? drillsById.get(row.correction_drill_id) : undefined;
       if (!drill) {
         unresolved += 1;
@@ -439,7 +527,7 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         drill,
       });
-    } else if (row.kind === "card") {
+    } else if (resolvedKind === "card") {
       const card = row.card_id ? cardsById.get(row.card_id) : undefined;
       if (!card) {
         unresolved += 1;
@@ -452,7 +540,7 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         card,
       });
-    } else if (row.kind === "dialogue_clip") {
+    } else if (resolvedKind === "listening_comprehension") {
       const hydration = row.dialogue_clip_id ? listeningById.get(row.dialogue_clip_id) : undefined;
       const prompt = parseListeningPromptFromMetadata(row.metadata);
       if (!hydration || !prompt) {
@@ -476,9 +564,25 @@ async function hydrateSession(
           prompt,
         },
       });
+    } else if (resolvedKind === "shadowing") {
+      const clip = row.dialogue_clip_id ? shadowingById.get(row.dialogue_clip_id) : undefined;
+      if (!clip) {
+        // Either the clip was pruned or it lost its materialised audio (the
+        // shadowing loader filters those out). Drop it so the runner doesn't
+        // park on a clip we can't actually play.
+        unresolved += 1;
+        continue;
+      }
+      items.push({
+        sessionItemId: row.id,
+        position: row.position,
+        kind: "shadowing",
+        completed: row.answered_at !== null,
+        clip,
+      });
     } else {
-      // Unknown kind (grammar_exercise placeholder). Drop rather than
-      // failing the whole page.
+      // Unknown kind (grammar_exercise placeholder, or a dialogue_clip row
+      // that lacked an FK). Drop rather than failing the whole page.
       unresolved += 1;
     }
   }

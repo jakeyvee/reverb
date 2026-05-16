@@ -7,6 +7,7 @@ import { completeSessionAction, type CompleteSessionActionResult } from "@/lib/s
 import type { DailySessionView, SessionItem } from "@/lib/session/orchestrator";
 import { SessionVocabCard } from "@/components/session/vocab-card";
 import { SessionDrillCard } from "@/components/session/drill-card";
+import { SessionShadowingCard } from "@/components/session/shadowing-card";
 import { SessionListeningCard } from "@/components/session/listening-card";
 
 // Orchestrates today's mixed session. The hydrated view is fetched on the
@@ -271,6 +272,26 @@ function SessionItemView({
             });
           } else if (result.ok) {
             onAnswered(item.sessionItemId);
+          }
+        }}
+        onAdvance={onAdvance}
+      />
+    );
+  }
+  if (item.kind === "shadowing") {
+    return (
+      <SessionShadowingCard
+        key={item.sessionItemId}
+        clip={item.clip}
+        sessionItemId={item.sessionItemId}
+        positionLabel={positionLabel}
+        onAnswered={(result) => {
+          if (result.ok) {
+            onAnswered(item.sessionItemId, {
+              sessionXpEarned: result.session.sessionXpEarned,
+              cardsReviewed: result.session.cardsReviewed,
+              exercisesAttempted: result.session.exercisesAttempted,
+            });
           }
         }}
         onAdvance={onAdvance}

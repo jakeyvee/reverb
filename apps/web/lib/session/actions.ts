@@ -20,6 +20,7 @@ import {
   type CompleteSessionResult,
   type DailySessionView,
 } from "@/lib/session/orchestrator";
+import { SHADOWING_XP_PER_PASS } from "@/lib/session/shadowing";
 import {
   LISTENING_PROMPT_KINDS,
   gradeListeningTranscription,
@@ -235,6 +236,102 @@ export async function startTodaysSessionAction(): Promise<StartTodaysSessionResu
   try {
     const session = await startOrResumeTodaysSession(supabase, user.id);
     return { ok: true, session };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
+}
+
+// ---- Shadowing ----------------------------------------------------------
+
+const ShadowingResultSchema = z.enum(["got_it", "try_again"]);
+export type ShadowingSelfMarkResult = z.infer<typeof ShadowingResultSchema>;
+
+const RecordShadowingAttemptInputSchema = z.object({
+  sessionItemId: z.string().uuid(),
+  dialogueClipId: z.string().uuid(),
+  result: ShadowingResultSchema,
+  // We don't persist recordings client-side, but the duration is useful for
+  // event payload + future analytics ("user actually attempted vs. only
+  // listened").
+  recordingMs: z.number().int().nonnegative().max(60_000).optional(),
+  responseMs: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(60 * 60_000)
+    .optional(),
+  // True if the user's browser didn't support MediaRecorder or denied
+  // permission. We still let them self-mark so a session can finish; the
+  // event payload tags this so we can spot environments that aren't gating
+  // shadowing properly.
+  fallback: z.boolean().optional(),
+});
+
+export type RecordShadowingAttemptInput = z.infer<typeof RecordShadowingAttemptInputSchema>;
+
+export type RecordShadowingAttemptResult =
+  | {
+      ok: true;
+      result: ShadowingSelfMarkResult;
+      xpAwarded: number;
+      session: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
+    }
+  | { ok: false; error: string };
+
+// Records a single shadowing self-mark. The MediaRecorder blob never reaches
+// the server — only the user's pass/fail call does. We mirror the drill
+// action's contract so SessionRunner can advance the queue with the same
+// `onAnswered` snapshot shape it already consumes for vocab + drills.
+export async function recordShadowingAttempt(
+  input: RecordShadowingAttemptInput,
+): Promise<RecordShadowingAttemptResult> {
+  const parsed = RecordShadowingAttemptInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid shadowing attempt." };
+  }
+
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+
+  const passed = parsed.data.result === "got_it";
+  const xpAwarded = passed ? SHADOWING_XP_PER_PASS : 0;
+
+  try {
+    const recorded = await recordSessionItemAnswer(supabase, user.id, {
+      sessionItemId: parsed.data.sessionItemId,
+      correct: passed,
+      rating: null,
+      responseMs: parsed.data.responseMs ?? null,
+      xpAwarded,
+      bucket: "exercise",
+      eventKind: "item_answered",
+      eventPayload: {
+        item_type: "shadowing",
+        dialogue_clip_id: parsed.data.dialogueClipId,
+        self_marked: parsed.data.result,
+        recording_ms: parsed.data.recordingMs ?? null,
+        fallback: parsed.data.fallback ?? false,
+      },
+    });
+    return {
+      ok: true,
+      result: parsed.data.result,
+      xpAwarded,
+      session: {
+        sessionItemId: parsed.data.sessionItemId,
+        sessionXpEarned: recorded.sessionXpEarned,
+        cardsReviewed: recorded.cardsReviewed,
+        exercisesAttempted: recorded.exercisesAttempted,
+      },
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
   }
