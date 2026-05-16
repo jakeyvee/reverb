@@ -86,9 +86,29 @@ function buildFile(): Tables<"lesson_files"> {
   };
 }
 
+function buildLesson(): Tables<"lessons"> {
+  const now = new Date(0).toISOString();
+  return {
+    id: LESSON_ID,
+    household_id: HOUSEHOLD_ID,
+    title: "Pipeline lesson",
+    description: null,
+    source_language: null,
+    target_language: null,
+    recorded_at: null,
+    status: "processing",
+    duration_ms: 60_000,
+    metadata: {},
+    created_by: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 function seed(supabase: FakeSupabase, jobOverrides: Partial<Tables<"lesson_jobs">> = {}) {
   supabase.insertJob(buildJob(jobOverrides));
   supabase.insertFile(buildFile());
+  supabase.insertLesson(buildLesson());
 }
 
 function asClient(supabase: FakeSupabase): ServiceClient {
