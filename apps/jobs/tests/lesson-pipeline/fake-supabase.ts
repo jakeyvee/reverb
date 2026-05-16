@@ -20,6 +20,8 @@ type GrammarPatternRow = Tables<"grammar_patterns">;
 type DialogueClipRow = Tables<"dialogue_clips">;
 type TeacherCorrectionRow = Tables<"teacher_corrections">;
 type ExtractionRunRow = Tables<"extraction_runs">;
+type CardRow = Tables<"cards">;
+type KnownWordRow = Tables<"user_known_words">;
 
 type Filter = { col: string; value: unknown };
 type AnyRow = Record<string, unknown>;
@@ -35,7 +37,9 @@ type TableName =
   | "grammar_patterns"
   | "dialogue_clips"
   | "teacher_corrections"
-  | "extraction_runs";
+  | "extraction_runs"
+  | "cards"
+  | "user_known_words";
 
 export class FakeSupabase {
   jobs: JobRow[] = [];
@@ -50,6 +54,8 @@ export class FakeSupabase {
   dialogueClips: DialogueClipRow[] = [];
   teacherCorrections: TeacherCorrectionRow[] = [];
   extractionRuns: ExtractionRunRow[] = [];
+  cards: CardRow[] = [];
+  knownWords: KnownWordRow[] = [];
   // Captures the (bucket, path, ttl) tuples requested for signed URLs, useful
   // for asserting we tried to download the right file.
   signedUrlRequests: Array<{ bucket: string; path: string; ttl: number }> = [];
@@ -82,6 +88,10 @@ export class FakeSupabase {
         return new RowsQuery(this, table, this.teacherCorrections);
       case "extraction_runs":
         return new RowsQuery(this, table, this.extractionRuns);
+      case "cards":
+        return new RowsQuery(this, table, this.cards);
+      case "user_known_words":
+        return new RowsQuery(this, table, this.knownWords);
       default:
         throw new Error(`FakeSupabase: unsupported table ${table}`);
     }
@@ -107,6 +117,12 @@ export class FakeSupabase {
   }
   insertProfile(row: ProfileRow): void {
     this.profiles.push({ ...row });
+  }
+  insertVocabItem(row: VocabRow): void {
+    this.vocabItems.push({ ...row });
+  }
+  insertKnownWord(row: KnownWordRow): void {
+    this.knownWords.push({ ...row });
   }
   job(): JobRow {
     const job = this.jobs[0];
@@ -194,13 +210,52 @@ export class FakeSupabase {
         ...row,
       };
     }
+    if (table === "cards") {
+      return {
+        id: row.id ?? randomUUID(),
+        state: "new",
+        due_at: now,
+        stability: 0,
+        difficulty: 0,
+        reps: 0,
+        lapses: 0,
+        scheduled_days: 0,
+        elapsed_days: 0,
+        last_reviewed_at: null,
+        metadata: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
+    if (table === "user_known_words") {
+      return {
+        source: "self_report",
+        marked_at: now,
+        ...row,
+      };
+    }
     return { ...row };
   }
 
   afterDelete(table: TableName, removed: AnyRow[]): void {
-    if (table !== "transcript_segments") return;
-    const removedIds = new Set(removed.map((row) => row.id));
-    this.transcriptWords = this.transcriptWords.filter((word) => !removedIds.has(word.segment_id));
+    if (table === "transcript_segments") {
+      const removedIds = new Set(removed.map((row) => row.id));
+      this.transcriptWords = this.transcriptWords.filter(
+        (word) => !removedIds.has(word.segment_id),
+      );
+      return;
+    }
+    if (table === "vocab_items") {
+      // Mirror the FK cascade so tests that delete vocab_items also see cards
+      // and user_known_words drop. The real schema uses
+      // `on delete cascade` for both.
+      const removedIds = new Set(removed.map((row) => row.id));
+      this.cards = this.cards.filter((card) => !removedIds.has(card.vocab_item_id));
+      this.knownWords = this.knownWords.filter(
+        (entry) => !removedIds.has(entry.vocab_item_id),
+      );
+    }
   }
 }
 
@@ -211,9 +266,15 @@ type Op =
   | { kind: "insert"; rows: AnyRow[] }
   | { kind: "upsert"; rows: AnyRow[]; onConflict: string[]; ignoreDuplicates: boolean };
 
+function matchesIlike(value: string, pattern: string): boolean {
+  const literal = pattern.replace(/\\([\\%_])/g, "$1");
+  return value.toLocaleLowerCase() === literal.toLocaleLowerCase();
+}
+
 class RowsQuery<TRow extends object> {
   private filters: Filter[] = [];
   private inFilters: Array<{ col: string; values: unknown[] }> = [];
+  private ilikeFilters: Array<{ col: string; pattern: string }> = [];
   private ordering: { col: string; ascending: boolean } | null = null;
   private rowLimit: number | null = null;
   private op: Op = { kind: "select" };
@@ -233,6 +294,10 @@ class RowsQuery<TRow extends object> {
   }
   in(col: string, values: unknown[]) {
     this.inFilters.push({ col, values });
+    return this;
+  }
+  ilike(col: string, pattern: string) {
+    this.ilikeFilters.push({ col, pattern });
     return this;
   }
   order(col: string, opts: { ascending: boolean }) {
@@ -305,6 +370,9 @@ class RowsQuery<TRow extends object> {
   private matchesFilters(row: AnyRow): boolean {
     for (const f of this.filters) if (row[f.col] !== f.value) return false;
     for (const f of this.inFilters) if (!f.values.includes(row[f.col])) return false;
+    for (const f of this.ilikeFilters) {
+      if (!matchesIlike(String(row[f.col] ?? ""), f.pattern)) return false;
+    }
     return true;
   }
 
