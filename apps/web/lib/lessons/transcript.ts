@@ -22,6 +22,22 @@ export type TranscriptAudio = {
   mimeType: string | null;
 };
 
+export type ExtractionVersionSummary = {
+  // The highest version number ever assigned to this lesson — `1` for a
+  // never-reprocessed lesson, `2+` after VOL-136 reprocessing.
+  currentVersion: number;
+  // Distinct version counts across all extraction_runs rows. Surfaced so the
+  // UI can write "v2 · 4 runs" without rolling up rows itself.
+  totalRuns: number;
+  // The most recent prompt_version on the current (non-superseded) runs.
+  // null for older lessons that pre-date the prompt_version column.
+  currentPromptVersion: string | null;
+  // True when there is at least one row with `superseded_at is not null`.
+  // The lesson detail page uses this to render a "this lesson has been
+  // reprocessed" hint with a link to historical versions.
+  hasHistory: boolean;
+};
+
 export type LessonTranscriptView = {
   lesson: {
     id: string;
@@ -41,6 +57,7 @@ export type LessonTranscriptView = {
   } | null;
   segments: TranscriptSegmentRow[];
   audio: TranscriptAudio | null;
+  extraction: ExtractionVersionSummary;
 };
 
 export type LoadTranscriptResult =
@@ -65,10 +82,16 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
     return { ok: false, reason: "not-found" };
   }
 
-  // Job, segments, and the audio file are independent reads — fire in parallel.
-  // The job row may be absent for a freshly-created lesson; the page still
-  // renders the lesson metadata and a "transcript not ready" state.
-  const [{ data: jobRow }, { data: segmentRows }, { data: audioFile }] = await Promise.all([
+  // Job, segments, the audio file, and the extraction-run summary are
+  // independent reads — fire in parallel. The job row may be absent for a
+  // freshly-created lesson; the page still renders the lesson metadata and
+  // a "transcript not ready" state.
+  const [
+    { data: jobRow },
+    { data: segmentRows },
+    { data: audioFile },
+    { data: extractionRunRows },
+  ] = await Promise.all([
     supabase
       .from("lesson_jobs")
       .select("status, error_summary, attempt_count, started_at, failed_at")
@@ -87,6 +110,11 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
+    supabase
+      .from("extraction_runs")
+      .select("version, prompt_version, superseded_at")
+      .eq("lesson_id", lessonId)
+      .order("version", { ascending: false }),
   ]);
 
   const segments: TranscriptSegmentRow[] = (segmentRows ?? []).map((row) => ({
@@ -108,6 +136,38 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
       audio = { signedUrl: signed.signedUrl, mimeType: audioFile.mime_type };
     }
   }
+
+  // Roll the extraction_runs rows up into the compact summary the page
+  // renders next to the title. The query returned every kind's row for
+  // every version, so the same `currentVersion` repeats across kinds —
+  // we count distinct values to keep the UI honest about how many times
+  // the lesson has been reprocessed.
+  const extractionVersions = new Set<number>();
+  let currentVersion = 0;
+  let currentPromptVersion: string | null = null;
+  let hasHistory = false;
+  for (const row of extractionRunRows ?? []) {
+    if (typeof row.version === "number") extractionVersions.add(row.version);
+    if (row.superseded_at !== null) hasHistory = true;
+  }
+  for (const row of extractionRunRows ?? []) {
+    if (row.superseded_at !== null) continue;
+    if (typeof row.version === "number" && row.version > currentVersion) {
+      currentVersion = row.version;
+      currentPromptVersion = row.prompt_version;
+    }
+  }
+  if (currentVersion === 0 && extractionVersions.size > 0) {
+    // Every run is superseded — surface the latest version as the "current"
+    // one so the UI doesn't render `v0`.
+    currentVersion = Math.max(...extractionVersions);
+  }
+  const extraction: ExtractionVersionSummary = {
+    currentVersion: currentVersion === 0 ? 1 : currentVersion,
+    totalRuns: extractionVersions.size === 0 ? 0 : extractionVersions.size,
+    currentPromptVersion,
+    hasHistory,
+  };
 
   return {
     ok: true,
@@ -132,6 +192,7 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
         : null,
       segments,
       audio,
+      extraction,
     },
   };
 }

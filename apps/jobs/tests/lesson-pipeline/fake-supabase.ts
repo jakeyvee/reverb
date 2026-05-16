@@ -297,6 +297,25 @@ export class FakeSupabase {
         ...row,
       };
     }
+    if (table === "extraction_runs") {
+      return {
+        id: row.id ?? randomUUID(),
+        status: "succeeded",
+        model: null,
+        prompt_version: null,
+        input: {},
+        output: {},
+        error: null,
+        cost_cents: null,
+        started_at: null,
+        finished_at: null,
+        version: 1,
+        superseded_at: null,
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
     if (table === "user_known_words") {
       return {
         source: "self_report",
@@ -359,6 +378,7 @@ class RowsQuery<TRow extends object> {
   private filters: Filter[] = [];
   private inFilters: Array<{ col: string; values: unknown[] }> = [];
   private ilikeFilters: Array<{ col: string; pattern: string }> = [];
+  private isFilters: Array<{ col: string; value: null }> = [];
   private ordering: { col: string; ascending: boolean } | null = null;
   private rowLimit: number | null = null;
   private op: Op = { kind: "select" };
@@ -378,6 +398,12 @@ class RowsQuery<TRow extends object> {
   }
   in(col: string, values: unknown[]) {
     this.inFilters.push({ col, values });
+    return this;
+  }
+  is(col: string, value: null) {
+    // PostgREST's `.is()` is strictly for null/true/false comparisons. The
+    // fake only needs the null case today (extraction_runs.superseded_at).
+    this.isFilters.push({ col, value });
     return this;
   }
   ilike(col: string, pattern: string) {
@@ -457,6 +483,10 @@ class RowsQuery<TRow extends object> {
     for (const f of this.ilikeFilters) {
       if (!matchesIlike(String(row[f.col] ?? ""), f.pattern)) return false;
     }
+    for (const f of this.isFilters) {
+      const value = row[f.col];
+      if (f.value === null && value !== null && value !== undefined) return false;
+    }
     return true;
   }
 
@@ -464,9 +494,15 @@ class RowsQuery<TRow extends object> {
     if (!this.ordering) return rows;
     const { col, ascending } = this.ordering;
     return [...rows].sort((a, b) => {
-      const av = String((a as AnyRow)[col]);
-      const bv = String((b as AnyRow)[col]);
-      return (ascending ? 1 : -1) * av.localeCompare(bv);
+      const av = (a as AnyRow)[col];
+      const bv = (b as AnyRow)[col];
+      // Sort numerically when both sides are numbers (e.g. extraction_runs
+      // ordered by version); fall back to lexicographic for timestamps and
+      // segment_index strings.
+      if (typeof av === "number" && typeof bv === "number") {
+        return (ascending ? 1 : -1) * (av - bv);
+      }
+      return (ascending ? 1 : -1) * String(av).localeCompare(String(bv));
     });
   }
 
@@ -506,7 +542,17 @@ class RowsQuery<TRow extends object> {
         const conflict = this.findConflict(materialized, this.op.onConflict);
         if (conflict) {
           if (this.op.ignoreDuplicates) continue;
-          Object.assign(conflict, materialized);
+          // Preserve the conflict row's primary key on update. Without this
+          // the fake's materializeRow would mint a fresh uuid and the
+          // Object.assign below would clobber the existing id — breaking
+          // any downstream FK (e.g. correction_drills →
+          // teacher_corrections.id) that depended on the row's identity
+          // surviving an upsert.
+          const overwrite = {
+            ...materialized,
+            id: (conflict as AnyRow).id,
+          };
+          Object.assign(conflict, overwrite);
           written.push(conflict);
           continue;
         }
