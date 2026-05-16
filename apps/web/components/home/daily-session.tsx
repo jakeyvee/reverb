@@ -21,8 +21,8 @@ export async function DailySessionModule() {
 
   return (
     <Card className="flex flex-col gap-4 md:col-span-2">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <p className="text-xs uppercase tracking-wider text-foreground-subtle">Today</p>
           <h2 className="mt-1 text-lg font-semibold tracking-tight">Your daily session</h2>
           <p className="mt-1 text-sm text-foreground-muted">

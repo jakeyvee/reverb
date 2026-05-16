@@ -355,7 +355,7 @@ function SessionProgress({
   exercisesAttempted: number;
 }) {
   return (
-    <div className="grid grid-cols-4 gap-2 text-center">
+    <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
       <Stat label="Item" value={positionLabel} />
       <Stat label="XP" value={String(xpEarned)} />
       <Stat label="Cards" value={String(cardsReviewed)} />
