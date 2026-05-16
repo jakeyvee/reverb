@@ -9,6 +9,13 @@ import {
 } from "@reverb/domain/schemas/correction-drill";
 import { requireUser } from "@/lib/auth/get-user";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import {
+  completeSession,
+  recordSessionItemAnswer,
+  startOrResumeTodaysSession,
+  type CompleteSessionResult,
+  type DailySessionView,
+} from "@/lib/session/orchestrator";
 
 export type RecordDrillAttemptInput = {
   drillId: string;
@@ -18,6 +25,12 @@ export type RecordDrillAttemptInput = {
   userResponse?: string;
   selfMarked?: CorrectionDrillResult;
   responseMs?: number;
+  // Optional session-item link. When provided, recording the answer also
+  // updates the practice_session_items row + the session counters + the
+  // practice_events log. Outside-of-session drills (a future "extra
+  // practice" entry point) just omit this and the session bookkeeping is
+  // skipped.
+  sessionItemId?: string;
 };
 
 export type RecordDrillAttemptResult =
@@ -28,6 +41,14 @@ export type RecordDrillAttemptResult =
       nextDueAt: string;
       xpAwarded: number;
       totalXp: number;
+      // Session counters, set when `sessionItemId` was passed in. The UI
+      // uses these to render live progress without a refetch.
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
     }
   | { ok: false; error: string };
 
@@ -105,7 +126,7 @@ export async function recordCorrectionDrillAttempt(
     result,
     response_ms: input.responseMs ?? null,
     xp_awarded: xpAwarded,
-    user_response: input.mode === "retype" ? input.userResponse ?? null : null,
+    user_response: input.mode === "retype" ? (input.userResponse ?? null) : null,
     attempted_at: now.toISOString(),
   });
   if (insertError) {
@@ -133,11 +154,50 @@ export async function recordCorrectionDrillAttempt(
     return { ok: false, error: updateError.message };
   }
 
-  // Intentionally no revalidatePath here: the MistakeDrillRunner stays mounted
-  // across answers, and a mid-batch refetch would drop the just-answered drill
-  // from the `drills` prop, shifting the runner's index off-by-one and skipping
-  // the next drill. /session is `dynamic = "force-dynamic"`, so the next page
-  // visit fetches fresh data anyway.
+  // Intentionally no revalidatePath here: SessionRunner stays mounted
+  // across answers, and a mid-batch refetch would drop the just-answered
+  // item from its `view.items` snapshot, shifting the runner's index off-
+  // by-one. /session is `dynamic = "force-dynamic"`, so the next full
+  // page visit fetches fresh data anyway.
+
+  type SessionSnapshot = {
+    sessionItemId: string;
+    sessionXpEarned: number;
+    cardsReviewed: number;
+    exercisesAttempted: number;
+  };
+  let sessionSnapshot: SessionSnapshot | undefined;
+  // Mistake drills are "exercise" bucket — they count toward
+  // exercises_attempted, not cards_reviewed. We only record a session item
+  // when the caller passed one in; outside-of-session use stays a single
+  // round-trip.
+  if (input.sessionItemId) {
+    try {
+      const recorded = await recordSessionItemAnswer(supabase, user.id, {
+        sessionItemId: input.sessionItemId,
+        correct: result === "pass",
+        rating: null,
+        responseMs: input.responseMs ?? null,
+        xpAwarded,
+        bucket: "exercise",
+      });
+      sessionSnapshot = {
+        sessionItemId: input.sessionItemId,
+        sessionXpEarned: recorded.sessionXpEarned,
+        cardsReviewed: recorded.cardsReviewed,
+        exercisesAttempted: recorded.exercisesAttempted,
+      };
+    } catch (sessionError) {
+      // The drill answer is already persisted — don't bubble the error to
+      // the user as a failed attempt. Log it so a follow-up can rebuild the
+      // session counters offline if it matters.
+      console.warn(
+        "recordSessionItemAnswer failed for drill",
+        sessionError instanceof Error ? sessionError.message : sessionError,
+      );
+    }
+  }
+
   return {
     ok: true,
     result,
@@ -145,5 +205,50 @@ export async function recordCorrectionDrillAttempt(
     nextDueAt: schedule.nextDueAt.toISOString(),
     xpAwarded,
     totalXp: nextXp,
+    session: sessionSnapshot,
   };
+}
+
+export type StartTodaysSessionResult =
+  | { ok: true; session: DailySessionView }
+  | { ok: false; error: string };
+
+// Server-action wrapper around the orchestrator. Used by the home page's
+// "Start Today's Session" CTA when we want the action surface (and the
+// resulting session id) without rendering `/session` first.
+export async function startTodaysSessionAction(): Promise<StartTodaysSessionResult> {
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+  try {
+    const session = await startOrResumeTodaysSession(supabase, user.id);
+    return { ok: true, session };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
+}
+
+export type CompleteSessionActionResult =
+  | { ok: true; summary: CompleteSessionResult }
+  | { ok: false; error: string };
+
+// Server action the SessionRunner calls after the last item is answered.
+// Wraps `completeSession` so the UI can show the XP-earned + streak summary
+// without an extra page load.
+export async function completeSessionAction(input: {
+  sessionId: string;
+}): Promise<CompleteSessionActionResult> {
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+  try {
+    const summary = await completeSession(supabase, user.id, input.sessionId);
+    return { ok: true, summary };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+  }
 }

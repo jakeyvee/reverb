@@ -1,74 +1,55 @@
 "use client";
 
-import { useState, useTransition, type FormEvent } from "react";
+import { useEffect, useState, useTransition, type FormEvent } from "react";
 import {
   CORRECTION_DRILL_HIGH_CONFIDENCE,
   CORRECTION_DRILL_MIN_CONFIDENCE,
   type CorrectionDrillResult,
 } from "@reverb/domain/schemas/correction-drill";
 import { Card } from "@/components/ui/card";
-import {
-  recordCorrectionDrillAttempt,
-  type RecordDrillAttemptResult,
-} from "@/lib/session/actions";
+import { recordCorrectionDrillAttempt, type RecordDrillAttemptResult } from "@/lib/session/actions";
 import type { CorrectionDrillView } from "@/lib/session/correction-drills";
 
+// Single-drill mistake runner. Renders one hydrated correction drill and
+// submits the user's attempt via the session action. Index management
+// belongs to the parent SessionRunner — this component handles only the
+// per-drill UI flow (retype/self_mark → answered → continue).
+
 type Props = {
-  drills: CorrectionDrillView[];
+  drill: CorrectionDrillView;
+  sessionItemId?: string;
+  positionLabel: string;
+  onAnswered: (result: RecordDrillAttemptResult) => void;
+  onAdvance: () => void;
 };
 
-type Phase =
-  | { kind: "prompt" }
-  | { kind: "answered"; result: RecordDrillAttemptResult }
-  | { kind: "done" };
-
+type Phase = { kind: "prompt" } | { kind: "answered"; result: RecordDrillAttemptResult };
 type Mode = "retype" | "self_mark";
 
-export function MistakeDrillRunner({ drills }: Props) {
-  // Snapshot the drill list on mount so a parent re-render (e.g. a future
-  // revalidate on a sibling action) can't shift the array under us mid-batch
-  // and skip drills. The session action deliberately avoids revalidating
-  // /session for the same reason — this is defense-in-depth.
-  const [snapshot] = useState(() => drills);
-  const [index, setIndex] = useState(0);
+export function SessionDrillCard({
+  drill,
+  sessionItemId,
+  positionLabel,
+  onAnswered,
+  onAdvance,
+}: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "prompt" });
   const [mode, setMode] = useState<Mode>("retype");
   const [value, setValue] = useState("");
   const [shown, setShown] = useState(false);
   const [pending, startTransition] = useTransition();
 
-  if (snapshot.length === 0) {
-    return null;
-  }
-  if (phase.kind === "done" || index >= snapshot.length) {
-    return (
-      <Card className="flex flex-col items-center gap-2 py-8 text-center">
-        <p className="text-sm font-medium text-foreground">All caught up.</p>
-        <p className="text-xs text-foreground-muted">
-          You completed every correction drill that was due. Come back later for the next batch.
-        </p>
-      </Card>
-    );
-  }
-
-  const drill = snapshot[index]!;
-  const tier = drill.confidenceTier;
-  const correction = drill.correction;
-
-  function reset() {
+  // Reset whenever the active drill changes (parent rerenders with a new
+  // drill prop). Keeps the retype field empty between drills.
+  useEffect(() => {
+    setPhase({ kind: "prompt" });
+    setMode("retype");
     setValue("");
     setShown(false);
-    setPhase({ kind: "prompt" });
-  }
+  }, [drill.drillId]);
 
-  function advance() {
-    if (index + 1 >= snapshot.length) {
-      setPhase({ kind: "done" });
-      return;
-    }
-    setIndex((i) => i + 1);
-    reset();
-  }
+  const tier = drill.confidenceTier;
+  const correction = drill.correction;
 
   function submitRetype(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -78,8 +59,10 @@ export function MistakeDrillRunner({ drills }: Props) {
         drillId: drill.drillId,
         mode: "retype",
         userResponse: value,
+        sessionItemId,
       });
       setPhase({ kind: "answered", result });
+      onAnswered(result);
     });
   }
 
@@ -90,17 +73,17 @@ export function MistakeDrillRunner({ drills }: Props) {
         drillId: drill.drillId,
         mode: "self_mark",
         selfMarked: self,
+        sessionItemId,
       });
       setPhase({ kind: "answered", result });
+      onAnswered(result);
     });
   }
 
   return (
     <Card className="flex flex-col gap-5 py-8">
       <div className="flex items-center justify-between text-xs text-foreground-subtle">
-        <span className="uppercase tracking-wider">
-          Mistake drill · {index + 1} of {snapshot.length}
-        </span>
+        <span className="uppercase tracking-wider">Mistake drill · {positionLabel}</span>
         {tier === "uncertain" ? (
           <span
             className="rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-700 dark:text-amber-300"
@@ -213,7 +196,7 @@ export function MistakeDrillRunner({ drills }: Props) {
           </div>
         )
       ) : (
-        <AnswerFeedback result={phase.result} onContinue={advance} />
+        <AnswerFeedback result={phase.result} onContinue={onAdvance} />
       )}
     </Card>
   );
@@ -253,9 +236,7 @@ function AnswerFeedback({
       {result.retired ? (
         <p className="text-xs text-foreground-muted">Retired — three passes in a row.</p>
       ) : (
-        <p className="text-xs text-foreground-subtle">
-          Next due {formatDate(result.nextDueAt)}
-        </p>
+        <p className="text-xs text-foreground-subtle">Next due {formatDate(result.nextDueAt)}</p>
       )}
       <button
         type="button"
