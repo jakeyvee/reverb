@@ -1,5 +1,6 @@
 "use server";
 
+import { z } from "zod";
 import { createServiceRoleClient } from "@reverb/db/server";
 import {
   CORRECTION_DRILL_XP_PER_PASS,
@@ -19,6 +20,12 @@ import {
   type CompleteSessionResult,
   type DailySessionView,
 } from "@/lib/session/orchestrator";
+import {
+  LISTENING_PROMPT_KINDS,
+  gradeListeningTranscription,
+  parseListeningPromptFromMetadata,
+  type ListeningPromptKind,
+} from "@/lib/session/listening-comprehension";
 
 export type RecordDrillAttemptInput = {
   drillId: string;
@@ -231,6 +238,155 @@ export async function startTodaysSessionAction(): Promise<StartTodaysSessionResu
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
   }
+}
+
+// ---- Listening comprehension --------------------------------------------
+
+// XP awarded for a correct listening answer. Lower than vocab/correction
+// passes because the snippet is shorter and the question type rotates —
+// we want it to feel rewarding without crowding out the SRS-driven kinds.
+// Kept module-private because "use server" forbids non-async exports.
+const LISTENING_XP_PER_CORRECT = 2;
+
+const ListeningAttemptInputSchema = z.object({
+  sessionItemId: z.string().uuid(),
+  promptKind: z.enum(LISTENING_PROMPT_KINDS),
+  // Free-text typed answer for the transcription mode. Used by both the
+  // automatic grader and the (optional) self-mark fallback.
+  typedAnswer: z.string().optional(),
+  // 0-based index into the persisted choices array for MC modes.
+  selectedIndex: z.number().int().nonnegative().optional(),
+  // Self-mark override: when the client passes this, we trust the user's
+  // own assessment (mainly for transcription "close enough" path).
+  selfMarked: z.enum(["pass", "fail"]).optional(),
+  responseMs: z.number().int().nonnegative().optional(),
+});
+
+export type RecordListeningAttemptInput = z.infer<typeof ListeningAttemptInputSchema>;
+
+export type RecordListeningAttemptResult =
+  | {
+      ok: true;
+      correct: boolean;
+      xpAwarded: number;
+      // The canonical answer for the question type, surfaced back so the
+      // UI can show "the speaker said …" or "the correct meaning was …"
+      // without re-deriving it client-side.
+      expected: {
+        promptKind: ListeningPromptKind;
+        text: string | null;
+        choiceIndex: number | null;
+      };
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
+    }
+  | { ok: false; error: string };
+
+export async function recordListeningAttempt(
+  input: RecordListeningAttemptInput,
+): Promise<RecordListeningAttemptResult> {
+  const parsed = ListeningAttemptInputSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid request." };
+  }
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+
+  const { data: item, error: itemError } = await supabase
+    .from("practice_session_items")
+    .select("id, kind, metadata, answered_at")
+    .eq("id", parsed.data.sessionItemId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (itemError) {
+    return { ok: false, error: itemError.message };
+  }
+  if (!item) {
+    return { ok: false, error: "Session item not found." };
+  }
+  if (item.kind !== "dialogue_clip") {
+    return { ok: false, error: "Session item is not a listening exercise." };
+  }
+  const prompt = parseListeningPromptFromMetadata(item.metadata);
+  if (!prompt) {
+    return { ok: false, error: "Listening prompt is missing or malformed." };
+  }
+  if (prompt.kind !== parsed.data.promptKind) {
+    return { ok: false, error: "Prompt kind mismatch." };
+  }
+
+  let correct = false;
+  if (parsed.data.selfMarked) {
+    correct = parsed.data.selfMarked === "pass";
+  } else if (prompt.kind === "transcription") {
+    const actual = parsed.data.typedAnswer ?? "";
+    if (actual.trim().length === 0) {
+      return { ok: false, error: "Type what you heard before submitting." };
+    }
+    const expected = prompt.expectedText ?? "";
+    correct = gradeListeningTranscription({ expected, actual }) === "pass";
+  } else {
+    const selected = parsed.data.selectedIndex;
+    if (selected === undefined) {
+      return { ok: false, error: "Pick an answer before submitting." };
+    }
+    if (selected < 0 || selected >= prompt.choices.length) {
+      return { ok: false, error: "Selected answer is out of range." };
+    }
+    correct = selected === prompt.answerIndex;
+  }
+
+  const xpAwarded = correct ? LISTENING_XP_PER_CORRECT : 0;
+
+  let sessionSnapshot: Extract<RecordListeningAttemptResult, { ok: true }>["session"];
+  try {
+    const recorded = await recordSessionItemAnswer(supabase, user.id, {
+      sessionItemId: parsed.data.sessionItemId,
+      correct,
+      rating: null,
+      responseMs: parsed.data.responseMs ?? null,
+      xpAwarded,
+      bucket: "exercise",
+      eventPayload: {
+        listening: {
+          prompt_kind: prompt.kind,
+          self_marked: parsed.data.selfMarked ?? null,
+          selected_index: parsed.data.selectedIndex ?? null,
+          typed_answer_length: parsed.data.typedAnswer?.length ?? null,
+        },
+      },
+    });
+    sessionSnapshot = {
+      sessionItemId: parsed.data.sessionItemId,
+      sessionXpEarned: recorded.sessionXpEarned,
+      cardsReviewed: recorded.cardsReviewed,
+      exercisesAttempted: recorded.exercisesAttempted,
+    };
+  } catch (sessionError) {
+    return {
+      ok: false,
+      error: sessionError instanceof Error ? sessionError.message : "Unexpected error.",
+    };
+  }
+
+  return {
+    ok: true,
+    correct,
+    xpAwarded,
+    expected: {
+      promptKind: prompt.kind,
+      text: prompt.expectedText,
+      choiceIndex: prompt.answerIndex,
+    },
+    session: sessionSnapshot,
+  };
 }
 
 export type CompleteSessionActionResult =
