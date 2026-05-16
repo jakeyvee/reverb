@@ -25,6 +25,11 @@ type Phase =
 type Mode = "retype" | "self_mark";
 
 export function MistakeDrillRunner({ drills }: Props) {
+  // Snapshot the drill list on mount so a parent re-render (e.g. a future
+  // revalidate on a sibling action) can't shift the array under us mid-batch
+  // and skip drills. The session action deliberately avoids revalidating
+  // /session for the same reason — this is defense-in-depth.
+  const [snapshot] = useState(() => drills);
   const [index, setIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>({ kind: "prompt" });
   const [mode, setMode] = useState<Mode>("retype");
@@ -32,10 +37,10 @@ export function MistakeDrillRunner({ drills }: Props) {
   const [shown, setShown] = useState(false);
   const [pending, startTransition] = useTransition();
 
-  if (drills.length === 0) {
+  if (snapshot.length === 0) {
     return null;
   }
-  if (phase.kind === "done" || index >= drills.length) {
+  if (phase.kind === "done" || index >= snapshot.length) {
     return (
       <Card className="flex flex-col items-center gap-2 py-8 text-center">
         <p className="text-sm font-medium text-foreground">All caught up.</p>
@@ -46,7 +51,7 @@ export function MistakeDrillRunner({ drills }: Props) {
     );
   }
 
-  const drill = drills[index]!;
+  const drill = snapshot[index]!;
   const tier = drill.confidenceTier;
   const correction = drill.correction;
 
@@ -57,7 +62,7 @@ export function MistakeDrillRunner({ drills }: Props) {
   }
 
   function advance() {
-    if (index + 1 >= drills.length) {
+    if (index + 1 >= snapshot.length) {
       setPhase({ kind: "done" });
       return;
     }
@@ -94,7 +99,7 @@ export function MistakeDrillRunner({ drills }: Props) {
     <Card className="flex flex-col gap-5 py-8">
       <div className="flex items-center justify-between text-xs text-foreground-subtle">
         <span className="uppercase tracking-wider">
-          Mistake drill · {index + 1} of {drills.length}
+          Mistake drill · {index + 1} of {snapshot.length}
         </span>
         {tier === "uncertain" ? (
           <span

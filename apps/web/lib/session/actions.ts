@@ -1,6 +1,5 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
 import {
   CORRECTION_DRILL_XP_PER_PASS,
   CorrectionDrillResultSchema,
@@ -134,7 +133,11 @@ export async function recordCorrectionDrillAttempt(
     return { ok: false, error: updateError.message };
   }
 
-  revalidatePath("/session");
+  // Intentionally no revalidatePath here: the MistakeDrillRunner stays mounted
+  // across answers, and a mid-batch refetch would drop the just-answered drill
+  // from the `drills` prop, shifting the runner's index off-by-one and skipping
+  // the next drill. /session is `dynamic = "force-dynamic"`, so the next page
+  // visit fetches fresh data anyway.
   return {
     ok: true,
     result,
