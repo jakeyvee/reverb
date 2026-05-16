@@ -390,6 +390,11 @@ function buildExtractionWrites(args: {
   model: string;
   promptVersion: string;
   extractedAt: string;
+  // Monotonically increasing per-(lesson, kind). The first ever extraction
+  // writes version 1; each reprocess bumps every kind's run by one so
+  // historical runs stay queryable side-by-side without a unique-index
+  // collision.
+  runVersion: number;
 }): ExtractionDerivedWrites {
   const promptById = new Map(args.segments.map((segment) => [promptSegmentId(segment), segment]));
   const vocab = uniqueBy(
@@ -407,7 +412,7 @@ function buildExtractionWrites(args: {
   const corrections = uniqueBy(
     args.extraction.teacher_corrections.map((item) => buildCorrectionRow(args, item, promptById)),
     (row) =>
-      `${String(row.segment_id)}|${String(row.kind)}|${String(row.source_text)}|${String(row.corrected_text)}`,
+      `${String(row.lesson_id)}|${String(row.kind)}|${String(row.source_text)}|${String(row.corrected_text)}`,
   );
 
   const input = {
@@ -429,27 +434,38 @@ function buildExtractionWrites(args: {
     cost_cents: null,
     started_at: args.extractedAt,
     finished_at: args.extractedAt,
+    version: args.runVersion,
+    superseded_at: null,
   })) satisfies Array<TablesInsert<"extraction_runs">>;
 
   return { vocab, grammar, dialogue, corrections, runs };
 }
 
-// Wipes the extraction outputs that this lesson alone owns and that the step
-// re-creates from scratch on every attempt. `vocab_items` is intentionally
-// excluded — vocab is household-shared and per-lesson dedupe lives in the
-// upsert path so cards (and any user practice attached to them) survive a
-// retry. The reset hook in `state.ts` mirrors this list.
+// Reset the lesson-owned extraction outputs before re-running the step.
+// Two design notes:
+//
+//   - `grammar_patterns` and `dialogue_clips` have no per-user state hanging
+//     off them, so a plain delete-then-insert keeps the table aligned with
+//     the latest run's output without harming anything.
+//
+//   - `teacher_corrections` and `extraction_runs` are NOT wiped here.
+//     teacher_corrections cascade-deletes `correction_drills` (per-user
+//     FSRS-like state), so we instead upsert on the (lesson, kind,
+//     source_text, corrected_text) unique index and let identical
+//     corrections reuse their existing row — preserving the partner's
+//     practice progress when a reprocess re-emits the same correction.
+//     extraction_runs becomes an append-only audit log keyed on `version`
+//     so re-runs can diff prompt revisions side-by-side; the prior runs
+//     are marked `superseded_at` rather than dropped.
+//
+// `vocab_items` is intentionally excluded — vocab dedupe + the
+// (household_id, lower(lemma), coalesce(reading, '')) unique index already
+// keeps cards (and any FSRS history) stable across runs.
 async function clearLessonOwnedExtractionRows(
   supabase: ServiceClient,
   lessonId: string,
 ): Promise<void> {
-  const tables = [
-    "extraction_runs",
-    "grammar_patterns",
-    "dialogue_clips",
-    "teacher_corrections",
-  ] as const;
-
+  const tables = ["grammar_patterns", "dialogue_clips"] as const;
   for (const table of tables) {
     const { error } = await supabase.from(table).delete().eq("lesson_id", lessonId);
     if (error) {
@@ -458,14 +474,80 @@ async function clearLessonOwnedExtractionRows(
   }
 }
 
+// Stamp every prior extraction_runs row for this lesson as superseded. Called
+// just before inserting the new run rows so the version transition is atomic
+// from the reader's perspective: a query for `superseded_at is null` always
+// returns exactly one set of (kind, version) rows after this completes.
+async function markPriorExtractionRunsSuperseded(
+  supabase: ServiceClient,
+  lessonId: string,
+  supersededAt: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from("extraction_runs")
+    .update({ superseded_at: supersededAt })
+    .eq("lesson_id", lessonId)
+    .is("superseded_at", null);
+  if (error) {
+    throw new Error(
+      `Could not mark prior extraction_runs as superseded for lesson ${lessonId}: ${error.message}`,
+    );
+  }
+}
+
+// Look up the next version number to use for this lesson's extraction_runs.
+// Returns 1 if the lesson has never been extracted before. Includes
+// superseded rows so versions stay monotonically increasing even across
+// reprocesses — readers can read the history by ordering on `version desc`.
+async function nextExtractionRunVersion(
+  supabase: ServiceClient,
+  lessonId: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from("extraction_runs")
+    .select("version")
+    .eq("lesson_id", lessonId)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(
+      `Could not read max extraction_runs.version for lesson ${lessonId}: ${error.message}`,
+    );
+  }
+  const current = typeof data?.version === "number" ? data.version : 0;
+  return current + 1;
+}
+
 async function persistLessonOwnedRows(
   supabase: ServiceClient,
   writes: Pick<ExtractionDerivedWrites, "grammar" | "dialogue" | "corrections" | "runs">,
 ): Promise<void> {
   await insertRows(supabase, "grammar_patterns", writes.grammar);
   await insertRows(supabase, "dialogue_clips", writes.dialogue);
-  await insertRows(supabase, "teacher_corrections", writes.corrections);
+  // Upsert on the natural key so re-emitted corrections reuse the existing
+  // row id — keeping each user's correction_drills FK intact. New
+  // corrections fall through to insert; rewritten ones land in `update`
+  // (which is fine: the source_text + corrected_text are part of the key,
+  // so the only fields that actually change are explanation / metadata /
+  // confidence). `ignoreDuplicates: false` is the default but called out
+  // explicitly to make the intent obvious.
+  await upsertCorrections(supabase, writes.corrections);
   await insertRows(supabase, "extraction_runs", writes.runs);
+}
+
+async function upsertCorrections(
+  supabase: ServiceClient,
+  rows: Array<TablesInsert<"teacher_corrections">>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const { error } = await supabase.from("teacher_corrections").upsert(rows, {
+    onConflict: "lesson_id,kind,source_text,corrected_text",
+    ignoreDuplicates: false,
+  });
+  if (error) {
+    throw new Error(`Could not upsert teacher_corrections: ${error.message}`);
+  }
 }
 
 async function insertRows(
@@ -480,21 +562,15 @@ async function insertRows(
 ): Promise<void>;
 async function insertRows(
   supabase: ServiceClient,
-  table: "teacher_corrections",
-  rows: Array<TablesInsert<"teacher_corrections">>,
-): Promise<void>;
-async function insertRows(
-  supabase: ServiceClient,
   table: "extraction_runs",
   rows: Array<TablesInsert<"extraction_runs">>,
 ): Promise<void>;
 async function insertRows(
   supabase: ServiceClient,
-  table: "grammar_patterns" | "dialogue_clips" | "teacher_corrections" | "extraction_runs",
+  table: "grammar_patterns" | "dialogue_clips" | "extraction_runs",
   rows:
     | Array<TablesInsert<"grammar_patterns">>
     | Array<TablesInsert<"dialogue_clips">>
-    | Array<TablesInsert<"teacher_corrections">>
     | Array<TablesInsert<"extraction_runs">>,
 ): Promise<void> {
   if (rows.length === 0) return;
@@ -1131,6 +1207,7 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
   });
 
   const extractedAt = new Date().toISOString();
+  const runVersion = await nextExtractionRunVersion(supabase, job.lesson_id);
   const writes = buildExtractionWrites({
     lesson,
     segments,
@@ -1138,13 +1215,17 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
     model,
     promptVersion,
     extractedAt,
+    runVersion,
   });
 
-  // Lesson-owned outputs (grammar/dialogue/corrections + the run audit trail)
-  // are wiped and rewritten — they have no per-user state to preserve. Vocab
-  // is reconciled separately so a household-shared word that was added by an
-  // earlier lesson keeps its existing row (and any cards / FSRS history).
+  // Reset the rows that aren't safe to rewrite in place (grammar + dialogue
+  // have no per-user state hanging off them), mark all prior extraction_runs
+  // for this lesson as superseded so the new version's rows are the only
+  // "current" ones, then persist the new set. Teacher corrections are
+  // upserted on a natural key so identical mistakes keep their existing
+  // row id — and with it each user's correction_drills FSRS-like progress.
   await clearLessonOwnedExtractionRows(supabase, job.lesson_id);
+  await markPriorExtractionRunsSuperseded(supabase, job.lesson_id, extractedAt);
   await persistLessonOwnedRows(supabase, writes);
 
   const resolvedVocab = await reconcileVocab(supabase, lesson.household_id, writes.vocab);
@@ -1168,6 +1249,7 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
 
   logger.info("Persisted lesson extraction", {
     lessonId: job.lesson_id,
+    runVersion,
     vocabCount: writes.vocab.length,
     newVocabCount,
     cardCount,
@@ -1190,6 +1272,7 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
       grammar_count: writes.grammar.length,
       dialogue_count: writes.dialogue.length,
       correction_count: writes.corrections.length,
+      run_version: runVersion,
     },
   };
 }

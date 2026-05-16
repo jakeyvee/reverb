@@ -9,8 +9,11 @@ import { LessonStatusBadge } from "@/components/lessons/lesson-status-badge";
 import { LessonAudioPlayer } from "@/components/lessons/lesson-audio-player";
 import { TranscriptView } from "@/components/lessons/transcript-view";
 import { RetryButton } from "@/components/lessons/retry-button";
+import { ReprocessButton } from "@/components/lessons/reprocess-button";
+import { getUser } from "@/lib/auth/get-user";
 import {
   isActiveLessonStatus,
+  isTerminalLessonStatus,
   lessonStatusHint,
 } from "@reverb/domain/schemas/lesson-status";
 
@@ -30,7 +33,7 @@ export default async function LessonDetailPage({ params }: Props) {
   // public-within-the-app so the marketing copy on /lessons still works
   // before any real upload has happened.
   await requireUser();
-  const result = await loadLessonTranscript(lessonId);
+  const [user, result] = await Promise.all([getUser(), loadLessonTranscript(lessonId)]);
   if (!result.ok) notFound();
 
   const { view } = result;
@@ -38,6 +41,14 @@ export default async function LessonDetailPage({ params }: Props) {
   const isFailed = status === "failed";
   const inFlight = status ? isActiveLessonStatus(status) : false;
   const hint = status ? lessonStatusHint(status) : null;
+  // Only Vincent (the upload account) drives reprocessing today, and the
+  // worker won't accept a re-enqueue while a run is still in flight — gate
+  // the button on the terminal-status condition so partners + transient
+  // states don't see a misleading affordance.
+  const canReprocess =
+    Boolean(user?.isVincent) && status !== null && isTerminalLessonStatus(status);
+  const hasReprocessHistory = view.extraction.hasHistory;
+  const currentVersion = view.extraction.currentVersion;
 
   return (
     <div className="space-y-6">
@@ -50,19 +61,25 @@ export default async function LessonDetailPage({ params }: Props) {
         </Link>
         <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
-            <h1 className="text-xl font-semibold tracking-tight md:text-2xl">{view.lesson.title}</h1>
+            <h1 className="text-xl font-semibold tracking-tight md:text-2xl">
+              {view.lesson.title}
+            </h1>
             {view.lesson.description ? (
               <p className="mt-1 text-sm text-foreground-muted">{view.lesson.description}</p>
             ) : null}
-            <p className="mt-2 text-xs text-foreground-subtle">
-              {formatMeta(view)}
-            </p>
+            <p className="mt-2 text-xs text-foreground-subtle">{formatMeta(view)}</p>
           </div>
-          {status ? (
-            <div className="shrink-0">
-              <LessonStatusBadge status={status} />
-            </div>
-          ) : null}
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            {status ? <LessonStatusBadge status={status} /> : null}
+            {hasReprocessHistory || currentVersion > 1 ? (
+              <span
+                className="rounded-md border border-border bg-surface-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-foreground-muted"
+                title="This lesson has been re-extracted. Cards and correction-drill progress are preserved across versions."
+              >
+                Extraction v{currentVersion}
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -81,6 +98,19 @@ export default async function LessonDetailPage({ params }: Props) {
 
       {hint && inFlight && !isFailed ? (
         <p className="text-xs text-foreground-subtle">{hint}</p>
+      ) : null}
+
+      {canReprocess ? (
+        <Card className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-foreground">Re-run extraction</p>
+            <p className="mt-1 text-xs text-foreground-muted">
+              Pulls vocab, grammar, and corrections again with the latest prompt. Existing review
+              progress is preserved where the word or correction identity still matches.
+            </p>
+          </div>
+          <ReprocessButton lessonId={view.lesson.id} disabled={inFlight} />
+        </Card>
       ) : null}
 
       {view.audio ? (

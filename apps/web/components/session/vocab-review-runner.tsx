@@ -4,15 +4,10 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import type { ReviewRating } from "@reverb/domain/schemas/review";
 import { Card } from "@/components/ui/card";
 import { PlayIcon } from "@/components/ui/icons";
-import {
-  submitVocabReviewAction,
-  type SubmitVocabReviewActionResult,
-} from "@/lib/vocab/actions";
+import { submitVocabReviewAction, type SubmitVocabReviewActionResult } from "@/lib/vocab/actions";
 import type { ReviewableVocabCard } from "@/lib/session/vocab-review";
-import {
-  resolveVocabReviewKey,
-  type ReviewKeyPhase,
-} from "@/lib/session/vocab-review-keys";
+import { resolveVocabReviewKey, type ReviewKeyPhase } from "@/lib/session/vocab-review-keys";
+import { VocabOverrideControls } from "@/components/session/vocab-overrides";
 
 type Props = {
   cards: ReviewableVocabCard[];
@@ -37,8 +32,7 @@ const RATINGS: RatingConfig[] = [
     value: "again",
     label: "Again",
     shortcut: "1",
-    toneClass:
-      "border-danger/40 text-danger hover:bg-danger/10 focus-visible:ring-danger/40",
+    toneClass: "border-danger/40 text-danger hover:bg-danger/10 focus-visible:ring-danger/40",
   },
   {
     value: "hard",
@@ -218,6 +212,16 @@ export function VocabReviewRunner({ cards, onReviewSubmitted }: Props) {
       {phase === "answered" && feedback ? (
         <ReviewFeedback feedback={feedback} onContinue={advance} />
       ) : null}
+
+      {/*
+        Lightweight per-card escape hatches: "I already know this" removes the
+        card from this user's deck (the partner's deck is untouched), and
+        "Flag this card" records the LLM-context-tagged feedback for a future
+        prompt eval pass. Both keep the underlying lesson intact.
+      */}
+      <div className="border-t border-border pt-3">
+        <VocabOverrideControls vocabItemId={current.vocabItemId} onKnown={advance} />
+      </div>
     </Card>
   );
 }
@@ -265,9 +269,7 @@ function CardFront({
       {card.vocab.exampleSentence ? (
         <div className="rounded-md border border-border bg-surface-muted/40 p-3">
           <p className="text-xs uppercase tracking-wider text-foreground-subtle">In context</p>
-          <p className="mt-1 break-words text-sm text-foreground">
-            {card.vocab.exampleSentence}
-          </p>
+          <p className="mt-1 break-words text-sm text-foreground">{card.vocab.exampleSentence}</p>
         </div>
       ) : null}
 
@@ -295,9 +297,7 @@ function CardBack({ card }: { card: ReviewableVocabCard }) {
         </p>
       </div>
       {card.vocab.exampleTranslation ? (
-        <p className="break-words text-sm text-foreground-muted">
-          {card.vocab.exampleTranslation}
-        </p>
+        <p className="break-words text-sm text-foreground-muted">{card.vocab.exampleTranslation}</p>
       ) : null}
       {card.lessonTitle && card.vocab.lessonId ? (
         <p className="text-[11px] text-foreground-subtle">

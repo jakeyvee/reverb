@@ -367,6 +367,8 @@ export type Database = {
           cost_cents: number | null;
           started_at: string | null;
           finished_at: string | null;
+          version: number;
+          superseded_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -383,6 +385,8 @@ export type Database = {
           cost_cents?: number | null;
           started_at?: string | null;
           finished_at?: string | null;
+          version?: number;
+          superseded_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -399,6 +403,8 @@ export type Database = {
           cost_cents?: number | null;
           started_at?: string | null;
           finished_at?: string | null;
+          version?: number;
+          superseded_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -408,6 +414,73 @@ export type Database = {
             columns: ["lesson_id"];
             isOneToOne: false;
             referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      extraction_flags: {
+        Row: {
+          id: string;
+          household_id: string;
+          lesson_id: string;
+          target_kind: Database["public"]["Enums"]["extraction_flag_target_kind"];
+          target_id: string;
+          reason: Database["public"]["Enums"]["extraction_flag_reason"];
+          notes: string | null;
+          flagged_by: string;
+          extraction_run_id: string | null;
+          model: string | null;
+          prompt_version: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id: string;
+          lesson_id: string;
+          target_kind: Database["public"]["Enums"]["extraction_flag_target_kind"];
+          target_id: string;
+          reason: Database["public"]["Enums"]["extraction_flag_reason"];
+          notes?: string | null;
+          flagged_by: string;
+          extraction_run_id?: string | null;
+          model?: string | null;
+          prompt_version?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string;
+          lesson_id?: string;
+          target_kind?: Database["public"]["Enums"]["extraction_flag_target_kind"];
+          target_id?: string;
+          reason?: Database["public"]["Enums"]["extraction_flag_reason"];
+          notes?: string | null;
+          flagged_by?: string;
+          extraction_run_id?: string | null;
+          model?: string | null;
+          prompt_version?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "extraction_flags_household_id_fkey";
+            columns: ["household_id"];
+            isOneToOne: false;
+            referencedRelation: "households";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "extraction_flags_lesson_id_fkey";
+            columns: ["lesson_id"];
+            isOneToOne: false;
+            referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "extraction_flags_extraction_run_id_fkey";
+            columns: ["extraction_run_id"];
+            isOneToOne: false;
+            referencedRelation: "extraction_runs";
             referencedColumns: ["id"];
           },
         ];
@@ -1485,6 +1558,14 @@ export type Database = {
         | "failed";
       extraction_run_kind: "vocab" | "grammar" | "dialogue" | "corrections";
       extraction_run_status: "queued" | "running" | "succeeded" | "failed";
+      extraction_flag_target_kind: "vocab" | "grammar" | "dialogue" | "correction";
+      extraction_flag_reason:
+        | "wrong_translation"
+        | "not_a_word"
+        | "wrong_split"
+        | "duplicate"
+        | "low_value"
+        | "other";
       card_state: "new" | "learning" | "review" | "relearning";
       review_rating: "again" | "hard" | "good" | "easy";
       grammar_exercise_kind: "fill_blank" | "multiple_choice" | "translate" | "reorder";

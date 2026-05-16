@@ -297,22 +297,33 @@ const STAGE_RESET_HOOKS: Record<WorkerStage, StageResetHook> = {
       })
       .eq("lesson_id", lessonId);
     if (error) {
-      throw new Error(`Could not reset diarization labels for lesson ${lessonId}: ${error.message}`);
+      throw new Error(
+        `Could not reset diarization labels for lesson ${lessonId}: ${error.message}`,
+      );
     }
   },
   extracting: async (supabase, lessonId) => {
     // Wipe the lesson-owned derived rows so the retried extraction replaces
-    // the previous attempt rather than appending duplicates. `vocab_items`
-    // is intentionally excluded — vocab is household-shared and the
-    // extraction step reconciles it via dedupe + upsert, so leaving the
-    // existing rows in place lets per-user `cards` (and any FSRS history
-    // attached to them) survive the retry.
-    const tables = [
-      "extraction_runs",
-      "grammar_patterns",
-      "dialogue_clips",
-      "teacher_corrections",
-    ] as const;
+    // the previous attempt rather than appending duplicates. Two rows escape
+    // the reset:
+    //
+    //   - `vocab_items` is household-shared and reconciled in-step via the
+    //     unique-index upsert; leaving rows in place lets `cards` (and any
+    //     FSRS history attached to them) survive the retry.
+    //
+    //   - `teacher_corrections` is no longer wiped: VOL-136 added a unique
+    //     index on (lesson_id, kind, source_text, corrected_text) and the
+    //     step now upserts on that key, so identical corrections reuse the
+    //     existing row id and keep each user's `correction_drills` FK
+    //     pointing at valid state. Wiping here would cascade-delete the
+    //     partner's mistake-drill progress on every transient extraction
+    //     failure — a regression worth avoiding even for retries.
+    //
+    // `extraction_runs` is also untouched. The step's
+    // `markPriorExtractionRunsSuperseded` flips the prior run rows to
+    // superseded just before inserting the new version, so the table reads
+    // as a clean append-only audit log across attempts.
+    const tables = ["grammar_patterns", "dialogue_clips"] as const;
     for (const table of tables) {
       const { error } = await supabase.from(table).delete().eq("lesson_id", lessonId);
       if (error) {
