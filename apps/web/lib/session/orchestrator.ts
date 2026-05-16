@@ -4,6 +4,11 @@ import { classifyCorrectionConfidence } from "@reverb/domain/schemas/correction-
 import { loadDueVocabReviewCards, type ReviewableVocabCard } from "./vocab-review";
 import type { CorrectionDrillView } from "./correction-drills";
 import { ensureCorrectionDrillsForUser } from "./correction-drills";
+import {
+  loadShadowingCandidates,
+  loadShadowingClipsByIds,
+  type ShadowingClipView,
+} from "./shadowing";
 
 // VOL-121: Daily session orchestrator.
 //
@@ -20,6 +25,7 @@ import { ensureCorrectionDrillsForUser } from "./correction-drills";
 
 const DEFAULT_DRILL_LIMIT = 8;
 const DEFAULT_VOCAB_LIMIT = 12;
+const DEFAULT_SHADOWING_LIMIT = 3;
 
 export const VOCAB_REVIEW_XP_PER_GOOD_RATING = 3;
 // Vocab is awarded by rating. Again rates 0 because the user got it wrong;
@@ -36,15 +42,22 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 }
 
 // Pure assembly of the queue order. Pulled out so the rule (mistake drills
-// always slot ahead of vocab, ordering inside each kind is preserved from
-// the loader) lives in one testable place.
+// always slot ahead of vocab, vocab ahead of shadowing; ordering inside each
+// kind is preserved from the loader) lives in one testable place.
+//
+// Shadowing slots last because it's the slowest item per attempt (record +
+// playback + self-mark) and the lowest-priority repeatable practice — we'd
+// rather the user finish their vocab + mistake recovery first and treat
+// shadowing as the optional cool-down at the end of the queue.
 export type AssembledItem =
   | { kind: "mistake_drill"; correctionDrillId: string }
-  | { kind: "card"; cardId: string };
+  | { kind: "card"; cardId: string }
+  | { kind: "shadowing"; dialogueClipId: string };
 
 export function assembleSessionQueue(args: {
   corrections: ReadonlyArray<{ drillId: string }>;
   vocabCards: ReadonlyArray<{ cardId: string }>;
+  shadowingClips?: ReadonlyArray<{ clipId: string }>;
 }): AssembledItem[] {
   return [
     ...args.corrections.map<AssembledItem>((drill) => ({
@@ -54,6 +67,10 @@ export function assembleSessionQueue(args: {
     ...args.vocabCards.map<AssembledItem>((card) => ({
       kind: "card",
       cardId: card.cardId,
+    })),
+    ...(args.shadowingClips ?? []).map<AssembledItem>((clip) => ({
+      kind: "shadowing",
+      dialogueClipId: clip.clipId,
     })),
   ];
 }
@@ -76,6 +93,13 @@ export type SessionItem =
       kind: "card";
       completed: boolean;
       card: ReviewableVocabCard;
+    }
+  | {
+      sessionItemId: string;
+      position: number;
+      kind: "shadowing";
+      completed: boolean;
+      clip: ShadowingClipView;
     };
 
 export type DailySessionView = {
@@ -97,6 +121,7 @@ export type StartOrResumeOptions = {
   now?: Date;
   drillLimit?: number;
   vocabLimit?: number;
+  shadowingLimit?: number;
 };
 
 // Entry point for the /session page and the "Start Today's Session" CTA.
@@ -130,24 +155,21 @@ export async function startOrResumeTodaysSession(
     // queue stay in place.
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
-      const { drills, vocabCards } = await loadCandidateQueue(supabase, userId, {
+      const { drills, vocabCards, shadowingClips } = await loadCandidateQueue(supabase, userId, {
         now,
         drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
         vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+        shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
       });
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
         vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
+        shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
       });
       if (assembled.length > 0) {
-        const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) => ({
-          session_id: existing.id,
-          user_id: userId,
-          position: index,
-          kind: item.kind,
-          card_id: item.kind === "card" ? item.cardId : null,
-          correction_drill_id: item.kind === "mistake_drill" ? item.correctionDrillId : null,
-        }));
+        const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
+          itemToInsertRow(existing.id, userId, index, item),
+        );
         const { error } = await supabase.from("practice_session_items").insert(itemRows);
         if (error) {
           throw new Error(`Could not top up practice_session_items: ${error.message}`);
@@ -163,15 +185,17 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, vocabCards } = await loadCandidateQueue(supabase, userId, {
+  const { drills, vocabCards, shadowingClips } = await loadCandidateQueue(supabase, userId, {
     now,
     drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
     vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+    shadowingLimit: options.shadowingLimit ?? DEFAULT_SHADOWING_LIMIT,
   });
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
     vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
+    shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
   });
 
   const sessionRow: TablesInsert<"practice_sessions"> = {
@@ -194,14 +218,9 @@ export async function startOrResumeTodaysSession(
   }
 
   if (assembled.length > 0) {
-    const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) => ({
-      session_id: insertedSession.id,
-      user_id: userId,
-      position: index,
-      kind: item.kind,
-      card_id: item.kind === "card" ? item.cardId : null,
-      correction_drill_id: item.kind === "mistake_drill" ? item.correctionDrillId : null,
-    }));
+    const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
+      itemToInsertRow(insertedSession.id, userId, index, item),
+    );
     const { error: itemsError } = await supabase.from("practice_session_items").insert(itemRows);
     if (itemsError) {
       throw new Error(`Could not seed practice_session_items: ${itemsError.message}`);
@@ -252,10 +271,14 @@ async function findActiveSessionForDay(
 async function loadCandidateQueue(
   supabase: SupabaseClient<Database>,
   userId: string,
-  args: { now: Date; drillLimit: number; vocabLimit: number },
-): Promise<{ drills: CorrectionDrillView[]; vocabCards: ReviewableVocabCard[] }> {
+  args: { now: Date; drillLimit: number; vocabLimit: number; shadowingLimit: number },
+): Promise<{
+  drills: CorrectionDrillView[];
+  vocabCards: ReviewableVocabCard[];
+  shadowingClips: ShadowingClipView[];
+}> {
   const nowIso = args.now.toISOString();
-  const [drillResp, vocab] = await Promise.all([
+  const [drillResp, vocab, shadowing] = await Promise.all([
     supabase
       .from("correction_drills")
       .select(
@@ -267,6 +290,7 @@ async function loadCandidateQueue(
       .order("due_at", { ascending: true })
       .limit(args.drillLimit * 2),
     loadDueVocabReviewCards(supabase, userId, { now: args.now, limit: args.vocabLimit }),
+    loadShadowingCandidates(supabase, userId, { limit: args.shadowingLimit }),
   ]);
   if (drillResp.error) {
     throw new Error(`Could not load drill candidates: ${drillResp.error.message}`);
@@ -301,7 +325,51 @@ async function loadCandidateQueue(
       confidenceTier: tier,
     });
   }
-  return { drills, vocabCards: vocab };
+  return { drills, vocabCards: vocab, shadowingClips: shadowing };
+}
+
+// Translates an `AssembledItem` into the insert row for
+// `practice_session_items`. Centralises the kind ↔ FK-column mapping so the
+// two call sites (fresh session insert + same-day top-up) can't drift.
+// `shadowing` maps to `dialogue_clip` because the schema's `practice_item_kind`
+// uses `dialogue_clip` for any audio-shadowing item.
+function itemToInsertRow(
+  sessionId: string,
+  userId: string,
+  position: number,
+  item: AssembledItem,
+): TablesInsert<"practice_session_items"> {
+  if (item.kind === "card") {
+    return {
+      session_id: sessionId,
+      user_id: userId,
+      position,
+      kind: "card",
+      card_id: item.cardId,
+      correction_drill_id: null,
+      dialogue_clip_id: null,
+    };
+  }
+  if (item.kind === "mistake_drill") {
+    return {
+      session_id: sessionId,
+      user_id: userId,
+      position,
+      kind: "mistake_drill",
+      card_id: null,
+      correction_drill_id: item.correctionDrillId,
+      dialogue_clip_id: null,
+    };
+  }
+  return {
+    session_id: sessionId,
+    user_id: userId,
+    position,
+    kind: "dialogue_clip",
+    card_id: null,
+    correction_drill_id: null,
+    dialogue_clip_id: item.dialogueClipId,
+  };
 }
 
 // Hydrate a session row + its items into the view model the UI consumes.
@@ -316,7 +384,7 @@ async function hydrateSession(
   const { data: itemRows, error: itemsError } = await supabase
     .from("practice_session_items")
     .select(
-      "id, position, kind, card_id, correction_drill_id, answered_at, rating, correct, response_ms",
+      "id, position, kind, card_id, correction_drill_id, dialogue_clip_id, answered_at, rating, correct, response_ms",
     )
     .eq("session_id", session.id)
     .order("position", { ascending: true });
@@ -326,17 +394,21 @@ async function hydrateSession(
   const rows = itemRows ?? [];
   const drillIds: string[] = [];
   const cardIds: string[] = [];
+  const dialogueClipIds: string[] = [];
   for (const row of rows) {
     if (row.kind === "mistake_drill" && row.correction_drill_id) {
       drillIds.push(row.correction_drill_id);
     } else if (row.kind === "card" && row.card_id) {
       cardIds.push(row.card_id);
+    } else if (row.kind === "dialogue_clip" && row.dialogue_clip_id) {
+      dialogueClipIds.push(row.dialogue_clip_id);
     }
   }
 
-  const [drillsById, cardsById] = await Promise.all([
+  const [drillsById, cardsById, clipsById] = await Promise.all([
     drillIds.length > 0 ? loadDrillsByIds(supabase, userId, drillIds) : new Map(),
     cardIds.length > 0 ? loadCardsByIds(supabase, userId, cardIds) : new Map(),
+    dialogueClipIds.length > 0 ? loadShadowingClipsByIds(supabase, dialogueClipIds) : new Map(),
   ]);
 
   const items: SessionItem[] = [];
@@ -368,10 +440,26 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         card,
       });
+    } else if (row.kind === "dialogue_clip") {
+      const clip = row.dialogue_clip_id ? clipsById.get(row.dialogue_clip_id) : undefined;
+      if (!clip) {
+        // Either the clip was pruned or it lost its materialised audio (the
+        // shadowing loader filters those out). Drop it so the runner doesn't
+        // park on a clip we can't actually play.
+        unresolved += 1;
+        continue;
+      }
+      items.push({
+        sessionItemId: row.id,
+        position: row.position,
+        kind: "shadowing",
+        completed: row.answered_at !== null,
+        clip,
+      });
     } else {
-      // Unknown kind (grammar_exercise / dialogue_clip placeholders). The
-      // orchestrator currently emits only `card` and `mistake_drill`, so an
-      // unknown row is data drift — drop it from the queue rather than
+      // Unknown kind (grammar_exercise placeholder). The orchestrator
+      // currently emits only `card`, `mistake_drill`, and `dialogue_clip`, so
+      // an unknown row is data drift — drop it from the queue rather than
       // failing the whole page.
       unresolved += 1;
     }

@@ -4,7 +4,7 @@ import { assembleSessionQueue, xpForVocabRating } from "@/lib/session/orchestrat
 // Pure-function coverage for the orchestrator. The end-to-end DB flow is
 // exercised in integration runs against a Supabase instance; these tests
 // pin the rules that decide the visible queue:
-//   1. mistake drills always lead vocab cards,
+//   1. mistake drills always lead vocab cards, vocab cards lead shadowing,
 //   2. the caller's ordering inside each kind is preserved (loaders are
 //      responsible for due_at sorting),
 //   3. XP awards per vocab rating match the orchestrator's published map.
@@ -50,8 +50,34 @@ describe("assembleSessionQueue", () => {
     ]);
   });
 
-  it("returns an empty queue when neither kind has items", () => {
+  it("appends shadowing items after drills and vocab", () => {
+    const queue = assembleSessionQueue({
+      corrections: [{ drillId: "drill-a" }],
+      vocabCards: [{ cardId: "card-1" }],
+      shadowingClips: [{ clipId: "clip-a" }, { clipId: "clip-b" }],
+    });
+    expect(queue).toEqual([
+      { kind: "mistake_drill", correctionDrillId: "drill-a" },
+      { kind: "card", cardId: "card-1" },
+      { kind: "shadowing", dialogueClipId: "clip-a" },
+      { kind: "shadowing", dialogueClipId: "clip-b" },
+    ]);
+  });
+
+  it("returns shadowing-only queue when nothing else is due", () => {
+    const queue = assembleSessionQueue({
+      corrections: [],
+      vocabCards: [],
+      shadowingClips: [{ clipId: "clip-a" }],
+    });
+    expect(queue).toEqual([{ kind: "shadowing", dialogueClipId: "clip-a" }]);
+  });
+
+  it("returns an empty queue when no kind has items", () => {
     expect(assembleSessionQueue({ corrections: [], vocabCards: [] })).toEqual([]);
+    expect(assembleSessionQueue({ corrections: [], vocabCards: [], shadowingClips: [] })).toEqual(
+      [],
+    );
   });
 });
 
