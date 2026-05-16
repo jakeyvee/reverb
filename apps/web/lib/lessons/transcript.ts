@@ -1,6 +1,7 @@
 import { LESSON_AUDIO_BUCKET } from "@reverb/domain/schemas/upload";
 import { type LessonProcessingStatus } from "@reverb/domain/schemas/lesson-status";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { isDemoLessonMetadata } from "@/lib/lessons/demo";
 
 // 10 minutes is comfortably longer than a typical detail-page session without
 // over-extending the credential. The page is server-rendered, so every request
@@ -50,6 +51,10 @@ export type LessonTranscriptView = {
     createdAt: string;
     sourceLanguage: string | null;
     targetLanguage: string | null;
+    // True when the row was inserted by the smoke-test seed (VOL-124). The
+    // detail page uses this to render a "Demo" badge and hide affordances
+    // (retry, reprocess) that can't apply to a pre-baked fixture.
+    isDemo: boolean;
   };
   job: {
     status: LessonProcessingStatus;
@@ -77,7 +82,9 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
 
   const { data: lessonRow, error: lessonError } = await supabase
     .from("lessons")
-    .select("id, title, description, duration_ms, created_at, source_language, target_language")
+    .select(
+      "id, title, description, duration_ms, created_at, source_language, target_language, metadata",
+    )
     .eq("id", lessonId)
     .maybeSingle();
 
@@ -188,6 +195,7 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
         createdAt: lessonRow.created_at,
         sourceLanguage: lessonRow.source_language,
         targetLanguage: lessonRow.target_language,
+        isDemo: isDemoLessonMetadata(lessonRow.metadata),
       },
       job: jobRow
         ? {
