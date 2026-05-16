@@ -9,7 +9,12 @@ import {
   type JobRow,
   type ServiceClient,
 } from "./state.js";
-import { recordLessonNotification } from "./notifications.js";
+import {
+  dispatchLessonFailedEmail,
+  dispatchLessonReadyEmails,
+  recordLessonNotification,
+  type EmailDispatchContext,
+} from "./notifications.js";
 import { runStage, type StepHandlerMap, STEPS } from "./steps.js";
 import type { PipelineLogger } from "./logger.js";
 import { defaultPipelineServices, type PipelineServices } from "./services.js";
@@ -28,9 +33,10 @@ export type RunPipelineInput = {
   // Optional injection seam for tests. Defaults to the production step map so
   // the Trigger.dev task does not need to pass anything explicit.
   steps?: StepHandlerMap;
-  // Optional override of the provider adapters (Groq Whisper, etc.). Production
-  // code can leave this unset and pick up the real defaults; tests inject stubs
-  // so the orchestrator can be exercised without external network calls.
+  // Optional override of the provider adapters (Groq Whisper, etc.) and the
+  // email dispatcher. Production code can leave this unset and pick up the
+  // real defaults; tests inject stubs so the orchestrator can be exercised
+  // without external network calls.
   services?: PipelineServices;
 };
 
@@ -45,7 +51,14 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
   const payload = ProcessLessonPayloadSchema.parse(input.payload);
   const { supabase, logger, triggerRunId } = input;
   const steps = input.steps ?? STEPS;
-  const services = input.services ?? defaultPipelineServices();
+  const services = input.services ?? defaultPipelineServices(supabase);
+  const emailCtx: EmailDispatchContext = {
+    supabase,
+    logger,
+    emailer: services.emailer,
+    resolveRecipientEmail: services.resolveRecipientEmail,
+    resolveVincentEmail: services.resolveVincentEmail,
+  };
 
   let job: JobRow = await loadJobByLesson(supabase, payload.lessonId);
 
@@ -103,24 +116,31 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
     const failedJob = await failRun(supabase, job, currentStage, summary);
     // Notify household members in-app. Idempotent: if a previous attempt
     // already wrote a lesson_failed row for this lesson, the unique index
-    // makes this a no-op.
-    await recordLessonNotification(
+    // makes this a no-op and `recorded` will be empty — preventing a
+    // duplicate email to Vincent.
+    const recorded = await recordLessonNotification(
       supabase,
       failedJob,
       "lesson_failed",
       { errorSummary: summary, stage: currentStage },
       logger,
     );
+    await dispatchLessonFailedEmail(emailCtx, failedJob, recorded, {
+      errorSummary: summary,
+      stage: currentStage,
+    });
     // Re-throw so Trigger.dev marks the run failed and applies the configured
     // retry policy. The stage is already recorded on the row, so the next
     // attempt resumes from `currentStage`.
     throw err;
   }
 
-  // Successful completion: emit lesson_ready in-app records. Same dedupe
-  // contract — re-entering on an already-ready job short-circuits before
-  // this point, so a second emission is impossible.
-  await recordLessonNotification(supabase, job, "lesson_ready", {}, logger);
+  // Successful completion: emit lesson_ready in-app records and email each
+  // recipient whose row was just written. Same dedupe contract — re-entering
+  // an already-ready job short-circuits before this point, so a second
+  // emission is impossible.
+  const readyRecorded = await recordLessonNotification(supabase, job, "lesson_ready", {}, logger);
+  await dispatchLessonReadyEmails(emailCtx, job, readyRecorded);
 
   logger.info("Lesson pipeline complete", { lessonId: payload.lessonId, jobId: job.id });
   return {

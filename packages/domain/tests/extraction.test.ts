@@ -47,6 +47,7 @@ const validCorrection = {
   rationale: "Use 저 instead of 나 in polite speech.",
   category: "grammar",
   severity: "moderate",
+  confidence: 0.82,
 } as const;
 
 const validPayload = {
@@ -152,5 +153,19 @@ describe("ExtractionOutputSchema", () => {
       });
       expect(result.success).toBe(false);
     }
+  });
+
+  it("accepts a teacher correction without confidence (pre-VOL-120 shape)", () => {
+    const { confidence: _omit, ...rest } = validCorrection;
+    expect(TeacherCorrectionSchema.safeParse(rest).success).toBe(true);
+  });
+
+  it("rejects confidence outside [0,1]", () => {
+    expect(
+      TeacherCorrectionSchema.safeParse({ ...validCorrection, confidence: 1.5 }).success,
+    ).toBe(false);
+    expect(
+      TeacherCorrectionSchema.safeParse({ ...validCorrection, confidence: -0.1 }).success,
+    ).toBe(false);
   });
 });

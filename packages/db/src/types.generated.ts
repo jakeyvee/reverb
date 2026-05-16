@@ -829,6 +829,7 @@ export type Database = {
           source_text: string;
           corrected_text: string;
           explanation: string | null;
+          confidence: number | null;
           metadata: Json;
           created_at: string;
         };
@@ -841,6 +842,7 @@ export type Database = {
           source_text: string;
           corrected_text: string;
           explanation?: string | null;
+          confidence?: number | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -853,6 +855,7 @@ export type Database = {
           source_text?: string;
           corrected_text?: string;
           explanation?: string | null;
+          confidence?: number | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -1144,6 +1147,115 @@ export type Database = {
           },
         ];
       };
+      correction_drills: {
+        Row: {
+          id: string;
+          user_id: string;
+          teacher_correction_id: string;
+          state: Database["public"]["Enums"]["correction_drill_state"];
+          due_at: string;
+          attempts: number;
+          passes: number;
+          fails: number;
+          consecutive_passes: number;
+          last_result: Database["public"]["Enums"]["correction_drill_result"] | null;
+          last_attempted_at: string | null;
+          retired_at: string | null;
+          xp_earned: number;
+          metadata: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          teacher_correction_id: string;
+          state?: Database["public"]["Enums"]["correction_drill_state"];
+          due_at?: string;
+          attempts?: number;
+          passes?: number;
+          fails?: number;
+          consecutive_passes?: number;
+          last_result?: Database["public"]["Enums"]["correction_drill_result"] | null;
+          last_attempted_at?: string | null;
+          retired_at?: string | null;
+          xp_earned?: number;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          teacher_correction_id?: string;
+          state?: Database["public"]["Enums"]["correction_drill_state"];
+          due_at?: string;
+          attempts?: number;
+          passes?: number;
+          fails?: number;
+          consecutive_passes?: number;
+          last_result?: Database["public"]["Enums"]["correction_drill_result"] | null;
+          last_attempted_at?: string | null;
+          retired_at?: string | null;
+          xp_earned?: number;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "correction_drills_teacher_correction_id_fkey";
+            columns: ["teacher_correction_id"];
+            isOneToOne: false;
+            referencedRelation: "teacher_corrections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      correction_drill_attempts: {
+        Row: {
+          id: string;
+          drill_id: string;
+          user_id: string;
+          result: Database["public"]["Enums"]["correction_drill_result"];
+          response_ms: number | null;
+          xp_awarded: number;
+          user_response: string | null;
+          attempted_at: string;
+          metadata: Json;
+        };
+        Insert: {
+          id?: string;
+          drill_id: string;
+          user_id: string;
+          result: Database["public"]["Enums"]["correction_drill_result"];
+          response_ms?: number | null;
+          xp_awarded?: number;
+          user_response?: string | null;
+          attempted_at?: string;
+          metadata?: Json;
+        };
+        Update: {
+          id?: string;
+          drill_id?: string;
+          user_id?: string;
+          result?: Database["public"]["Enums"]["correction_drill_result"];
+          response_ms?: number | null;
+          xp_awarded?: number;
+          user_response?: string | null;
+          attempted_at?: string;
+          metadata?: Json;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "correction_drill_attempts_drill_id_fkey";
+            columns: ["drill_id"];
+            isOneToOne: false;
+            referencedRelation: "correction_drills";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -1195,6 +1307,8 @@ export type Database = {
         | "milestone";
       notification_channel: "push" | "email" | "in_app";
       notification_status: "queued" | "sent" | "failed" | "cancelled";
+      correction_drill_state: "new" | "learning" | "retired";
+      correction_drill_result: "pass" | "fail";
     };
     CompositeTypes: {
       [_ in never]: never;

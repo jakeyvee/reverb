@@ -251,6 +251,12 @@ function buildSteps(): {
         promptVersion: "extract-v1",
       };
     },
+    emailer: {
+      sendReady: async () => ({ ok: true, messageId: "msg_test" }),
+      sendFailed: async () => ({ ok: true, messageId: "msg_test" }),
+    },
+    resolveRecipientEmail: async (userId) => `${userId}@example.test`,
+    resolveVincentEmail: () => "vincent@example.test",
   };
 
   return {

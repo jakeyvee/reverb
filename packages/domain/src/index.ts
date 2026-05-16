@@ -8,6 +8,7 @@ export * from "./schemas/transcript.js";
 export * from "./schemas/diarization.js";
 export * from "./schemas/extraction.js";
 export * from "./schemas/practice.js";
+export * from "./schemas/correction-drill.js";
 export * from "./schemas/session.js";
 export * from "./schemas/providers.js";
 export * from "./schemas/upload.js";
