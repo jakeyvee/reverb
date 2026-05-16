@@ -148,12 +148,14 @@ function buildServices(
       rawResponse: "{}",
       model: "stub",
       promptVersion: "stub",
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
     extract: async () => ({
       extraction,
       rawResponse: JSON.stringify(extraction),
       model: "test-extract-model",
       promptVersion: "extract-v1",
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
     // The generating-audio tests use extractions with no grammar patterns,
     // so this stub never gets called — but the field is required by the

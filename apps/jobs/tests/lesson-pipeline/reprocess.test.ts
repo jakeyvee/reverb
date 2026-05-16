@@ -221,6 +221,7 @@ function buildSteps(promptVersion: string): {
       rawResponse: JSON.stringify(extraction),
       model: `model-${promptVersion}`,
       promptVersion,
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
     generateGrammarExercises: async (input) => ({
       output: {

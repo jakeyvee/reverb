@@ -167,6 +167,7 @@ function buildServices(diarizeStub: DiarizeStub): PipelineServices & {
     rawResponse: "{}",
     model: "claude-haiku-4-5-20251001",
     promptVersion: "diarization-v1",
+    usage: { inputTokens: 0, outputTokens: 0 },
   }));
   return {
     transcribe: async () => ({
@@ -191,6 +192,7 @@ function buildServices(diarizeStub: DiarizeStub): PipelineServices & {
       rawResponse: "{}",
       model: "stub",
       promptVersion: "extract-v1",
+      usage: { inputTokens: 0, outputTokens: 0 },
     }),
   };
 }
@@ -409,6 +411,7 @@ describe("diarizing stage", () => {
         rawResponse: "{}",
         model: "stub",
         promptVersion: "stub",
+        usage: { inputTokens: 0, outputTokens: 0 },
       }),
     };
 
@@ -461,6 +464,7 @@ describe("diarizing stage", () => {
         rawResponse: "{}",
         model: "stub",
         promptVersion: "stub",
+        usage: { inputTokens: 0, outputTokens: 0 },
       }),
     };
 
