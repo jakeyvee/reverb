@@ -476,6 +476,77 @@ describe("runLessonPipeline extraction integration", () => {
     });
   });
 
+  it("scopes the dedupe lookup to the prepared lemmas and tolerates case differences in stored vocab", async () => {
+    const supabase = new FakeSupabase();
+    seed(supabase);
+    const { steps, services } = buildSteps();
+
+    // Seed an existing row whose stored case differs from the extraction's
+    // normalized lemma. The lookup must still find it via the lowercased
+    // candidate so the unique index isn't tripped on insert.
+    const existingVocabId = "vocab-existing-kopi-cased";
+    const previousLessonId = "99999999-9999-9999-9999-999999999998";
+    supabase.insertVocabItem({
+      id: existingVocabId,
+      household_id: HOUSEHOLD_ID,
+      lesson_id: previousLessonId,
+      lemma: "Kopi",
+      reading: "kopi",
+      translation: "coffee",
+      part_of_speech: null,
+      example_sentence: "Original example.",
+      example_translation: "Original gloss.",
+      audio_storage_bucket: null,
+      audio_storage_path: null,
+      difficulty: null,
+      metadata: {},
+      created_at: new Date(0).toISOString(),
+      updated_at: new Date(0).toISOString(),
+    });
+    // An unrelated row that shares the household but not the lemma — proves
+    // the scoped query filters it out (the old unscoped query would have
+    // pulled it back too, but it's unrelated to the dedupe decision either
+    // way).
+    supabase.insertVocabItem({
+      id: "vocab-unrelated",
+      household_id: HOUSEHOLD_ID,
+      lesson_id: previousLessonId,
+      lemma: "teh",
+      reading: null,
+      translation: "tea",
+      part_of_speech: null,
+      example_sentence: null,
+      example_translation: null,
+      audio_storage_bucket: null,
+      audio_storage_path: null,
+      difficulty: null,
+      metadata: {},
+      created_at: new Date(0).toISOString(),
+      updated_at: new Date(0).toISOString(),
+    });
+
+    await runLessonPipeline({
+      supabase: asClient(supabase),
+      payload: { lessonId: LESSON_ID },
+      triggerRunId: "run_case_mismatch",
+      logger: noopLogger,
+      steps,
+      services,
+    });
+
+    // The cased existing row was reused — no new vocab_item was inserted for
+    // "kopi", so the household still has exactly the seeded two rows.
+    expect(supabase.vocabItems).toHaveLength(2);
+    const kopi = supabase.vocabItems.find((row) => row.id === existingVocabId)!;
+    expect(kopi.lemma).toBe("Kopi");
+    expect(kopi.example_sentence).toBe("Original example.");
+    // Cards point at the reused vocab_item.
+    expect(supabase.cards).toHaveLength(2);
+    for (const card of supabase.cards) {
+      expect(card.vocab_item_id).toBe(existingVocabId);
+    }
+  });
+
   it("is idempotent across extraction retries — re-running does not duplicate cards", async () => {
     const supabase = new FakeSupabase();
     seed(supabase);

@@ -474,25 +474,60 @@ type ExistingVocabRow = {
   reading: string | null;
 };
 
-// Pull the household's existing vocab so we can dedupe against it. Vocab is
-// household-shared, so a word that appeared in an earlier lesson must reuse
-// the same row — both to satisfy the unique index on
-// (household_id, lower(lemma), coalesce(reading, '')) and to keep any cards
-// already attached to that vocab_item stable across lessons.
+function lemmaCaseVariants(lemma: string): string[] {
+  const lower = lemma.toLowerCase();
+  const upper = lemma.toUpperCase();
+  const capitalized = lower.length > 0 ? lower[0]!.toUpperCase() + lower.slice(1) : lower;
+  return [lemma, lower, upper, capitalized];
+}
+
+// Pull the household's existing vocab for the lemmas we're about to insert,
+// so we can dedupe against it. Vocab is household-shared, so a word that
+// appeared in an earlier lesson must reuse the same row — both to satisfy
+// the unique index on (household_id, lower(lemma), coalesce(reading, ''))
+// and to keep any cards already attached to that vocab_item stable across
+// lessons.
+//
+// The query is restricted to the prepared lemmas (rather than the household's
+// entire vocab) so request size scales with the new extraction, not with the
+// household's lifetime vocab — PostgREST caps unbounded selects at 1000 rows,
+// which would silently miss older entries once a household crosses that
+// threshold and trigger unique-index errors on the next insert.
 async function loadHouseholdVocabIndex(
   supabase: ServiceClient,
   householdId: string,
+  prepared: PreparedVocab[],
 ): Promise<Map<string, ExistingVocabRow>> {
+  if (prepared.length === 0) return new Map();
+
+  // The dedupe key (and the underlying unique index) is case-insensitive,
+  // but `.in` is not — enumerate the realistic case variants of each
+  // prepared lemma so we still find an existing row whose stored case
+  // differs from this extraction's. For non-Latin scripts (Japanese, Hangul,
+  // etc.) the case helpers are no-ops and the set collapses back to the
+  // single lemma.
+  const lemmaCandidates = new Set<string>();
+  for (const entry of prepared) {
+    for (const variant of lemmaCaseVariants(entry.row.lemma as string)) {
+      lemmaCandidates.add(variant);
+    }
+  }
+
   const { data, error } = await supabase
     .from("vocab_items")
     .select("id, lemma, reading")
-    .eq("household_id", householdId);
+    .eq("household_id", householdId)
+    .in("lemma", Array.from(lemmaCandidates));
   if (error) {
     throw new Error(`Could not load vocab_items for household ${householdId}: ${error.message}`);
   }
+  const preparedKeys = new Set(prepared.map((entry) => entry.key));
   const index = new Map<string, ExistingVocabRow>();
   for (const row of (data ?? []) as ExistingVocabRow[]) {
-    index.set(vocabDedupeKey({ lemma: row.lemma, reading: row.reading }), row);
+    const key = vocabDedupeKey({ lemma: row.lemma, reading: row.reading });
+    if (preparedKeys.has(key)) {
+      index.set(key, row);
+    }
   }
   return index;
 }
@@ -511,7 +546,7 @@ async function reconcileVocab(
 ): Promise<ResolvedVocab[]> {
   if (prepared.length === 0) return [];
 
-  const existing = await loadHouseholdVocabIndex(supabase, householdId);
+  const existing = await loadHouseholdVocabIndex(supabase, householdId, prepared);
   const resolved: ResolvedVocab[] = [];
   const toInsert: PreparedVocab[] = [];
 
