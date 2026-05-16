@@ -270,7 +270,8 @@ insert into public.cards (
   elapsed_days
 )
 select
-  ('eeeeeeee-' || lpad(user_idx::text, 4, '0') || '-0000-0000-0000' || lpad(vocab_idx::text, 12, '0'))::uuid,
+  -- UUID layout is 8-4-4-4-12; concatenation must produce exactly that.
+  ('eeeeeeee-' || lpad(user_idx::text, 4, '0') || '-0000-0000-' || lpad(vocab_idx::text, 12, '0'))::uuid,
   user_id::uuid,
   vocab_id::uuid,
   'new'::public.card_state,
@@ -358,7 +359,8 @@ insert into public.correction_drills (
   due_at
 )
 select
-  ('99999999-' || lpad(user_idx::text, 4, '0') || '-0000-0000-0000' || lpad(correction_idx::text, 12, '0'))::uuid,
+  -- UUID layout is 8-4-4-4-12; concatenation must produce exactly that.
+  ('99999999-' || lpad(user_idx::text, 4, '0') || '-0000-0000-' || lpad(correction_idx::text, 12, '0'))::uuid,
   user_id::uuid,
   correction_id::uuid,
   'new'::public.correction_drill_state,
