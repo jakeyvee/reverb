@@ -7,6 +7,7 @@ import type { Json } from "@reverb/db/types";
 import { getUser } from "@/lib/auth/get-user";
 import { getProfile } from "@/lib/auth/get-profile";
 import { enqueueLessonProcessing } from "@/lib/jobs/enqueue-lesson-processing";
+import { isDemoLessonMetadata } from "@/lib/lessons/demo";
 
 const RetryInputSchema = z.object({
   lessonId: z.string().uuid(),
@@ -59,7 +60,7 @@ export async function retryLessonProcessing(
   // Service role bypasses RLS, so this scope check is what protects the row.
   const { data: lesson, error: lessonError } = await supabase
     .from("lessons")
-    .select("id, household_id")
+    .select("id, household_id, metadata")
     .eq("id", parsed.data.lessonId)
     .maybeSingle();
   if (lessonError || !lesson) {
@@ -67,6 +68,11 @@ export async function retryLessonProcessing(
   }
   if (lesson.household_id !== profile.householdId) {
     return { ok: false, error: "Lesson not found." };
+  }
+  // Demo lessons are pre-seeded fixtures (VOL-124) that never go through the
+  // worker pipeline. Refuse retry rather than queue an audio-less run.
+  if (isDemoLessonMetadata(lesson.metadata)) {
+    return { ok: false, error: "Demo lessons cannot be reprocessed." };
   }
 
   const { data: job, error: jobError } = await supabase
@@ -204,7 +210,7 @@ export async function reprocessLesson(input: ReprocessLessonInput): Promise<Repr
 
   const { data: lesson, error: lessonError } = await supabase
     .from("lessons")
-    .select("id, household_id")
+    .select("id, household_id, metadata")
     .eq("id", parsed.data.lessonId)
     .maybeSingle();
   if (lessonError || !lesson) {
@@ -212,6 +218,10 @@ export async function reprocessLesson(input: ReprocessLessonInput): Promise<Repr
   }
   if (lesson.household_id !== profile.householdId) {
     return { ok: false, error: "Lesson not found." };
+  }
+  // Demo seed lessons (VOL-124) never participate in the extraction pipeline.
+  if (isDemoLessonMetadata(lesson.metadata)) {
+    return { ok: false, error: "Demo lessons cannot be reprocessed." };
   }
 
   const { data: job, error: jobError } = await supabase

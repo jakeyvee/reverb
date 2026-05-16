@@ -30,10 +30,13 @@ pnpm install
 cp .env.example .env.local
 cp apps/web/.env.local.example apps/web/.env.local
 cp apps/jobs/.env.local.example apps/jobs/.env.local
+pnpm --filter @reverb/db db:reset  # apply migrations + load the demo seed
 pnpm dev:web
 ```
 
-The web app boots at <http://localhost:3000>.
+The web app boots at <http://localhost:3000>. After `db:reset` you can sign
+in as `alice@reverb.local` or `bob@reverb.local` with the password
+`reverb-local` and immediately practice against the pre-seeded demo lesson.
 
 ## Running the background jobs (Trigger.dev)
 
@@ -127,6 +130,14 @@ pnpm lint
 pnpm test
 pnpm build
 ```
+
+## MVP smoke test
+
+Before each deploy, walk the manual checklist in
+[`docs/smoke-test.md`](docs/smoke-test.md). It runs against the demo
+fixture loaded by `pnpm --filter @reverb/db db:reset` and exercises the
+critical loop end-to-end: sign-in → daily session → vocab review →
+mistake drill → streak/XP update → lesson archive → transcript view.
 
 ## Deployment
 
