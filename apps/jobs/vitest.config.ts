@@ -23,6 +23,10 @@ export default defineConfig({
         replacement: path.resolve(here, "../../packages/db/src/types.ts"),
       },
       {
+        find: "@reverb/db/usage",
+        replacement: path.resolve(here, "../../packages/db/src/usage.ts"),
+      },
+      {
         find: "@reverb/domain/schemas/upload",
         replacement: path.resolve(here, "../../packages/domain/src/schemas/upload.ts"),
       },

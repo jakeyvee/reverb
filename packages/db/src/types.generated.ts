@@ -259,6 +259,9 @@ export type Database = {
           speaker_low_priority: boolean;
           language: string | null;
           text: string;
+          translation: string | null;
+          translation_language: string | null;
+          translated_at: string | null;
           metadata: Json;
           created_at: string;
         };
@@ -274,6 +277,9 @@ export type Database = {
           speaker_low_priority?: boolean;
           language?: string | null;
           text: string;
+          translation?: string | null;
+          translation_language?: string | null;
+          translated_at?: string | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -289,6 +295,9 @@ export type Database = {
           speaker_low_priority?: boolean;
           language?: string | null;
           text?: string;
+          translation?: string | null;
+          translation_language?: string | null;
+          translated_at?: string | null;
           metadata?: Json;
           created_at?: string;
         };
@@ -1484,6 +1493,84 @@ export type Database = {
           },
         ];
       };
+      provider_usage_events: {
+        Row: {
+          id: string;
+          household_id: string | null;
+          user_id: string | null;
+          lesson_id: string | null;
+          provider: string;
+          operation: string;
+          model: string | null;
+          surface: string;
+          status: string;
+          audio_duration_ms: number | null;
+          input_tokens: number | null;
+          output_tokens: number | null;
+          character_count: number | null;
+          latency_ms: number | null;
+          cost_micro_usd: number | null;
+          error: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id?: string | null;
+          user_id?: string | null;
+          lesson_id?: string | null;
+          provider: string;
+          operation: string;
+          model?: string | null;
+          surface: string;
+          status?: string;
+          audio_duration_ms?: number | null;
+          input_tokens?: number | null;
+          output_tokens?: number | null;
+          character_count?: number | null;
+          latency_ms?: number | null;
+          cost_micro_usd?: number | null;
+          error?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string | null;
+          user_id?: string | null;
+          lesson_id?: string | null;
+          provider?: string;
+          operation?: string;
+          model?: string | null;
+          surface?: string;
+          status?: string;
+          audio_duration_ms?: number | null;
+          input_tokens?: number | null;
+          output_tokens?: number | null;
+          character_count?: number | null;
+          latency_ms?: number | null;
+          cost_micro_usd?: number | null;
+          error?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "provider_usage_events_household_id_fkey";
+            columns: ["household_id"];
+            isOneToOne: false;
+            referencedRelation: "households";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "provider_usage_events_lesson_id_fkey";
+            columns: ["lesson_id"];
+            isOneToOne: false;
+            referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       chat_corrections: {
         Row: {
           id: string;
@@ -1538,9 +1625,189 @@ export type Database = {
           },
         ];
       };
+      scenario_sessions: {
+        Row: {
+          id: string;
+          user_id: string;
+          scenario_id: string;
+          level: string;
+          status: string;
+          xp_earned: number;
+          total_messages: number;
+          total_user_messages: number;
+          last_message_at: string | null;
+          completed_at: string | null;
+          abandoned_at: string | null;
+          metadata: Json;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          scenario_id: string;
+          level?: string;
+          status?: string;
+          xp_earned?: number;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          completed_at?: string | null;
+          abandoned_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          scenario_id?: string;
+          level?: string;
+          status?: string;
+          xp_earned?: number;
+          total_messages?: number;
+          total_user_messages?: number;
+          last_message_at?: string | null;
+          completed_at?: string | null;
+          abandoned_at?: string | null;
+          metadata?: Json;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      scenario_messages: {
+        Row: {
+          id: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          session_id: string;
+          user_id: string;
+          role: Database["public"]["Enums"]["chat_message_role"];
+          content: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          session_id?: string;
+          user_id?: string;
+          role?: Database["public"]["Enums"]["chat_message_role"];
+          content?: string;
+          language?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "scenario_messages_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      scenario_corrections: {
+        Row: {
+          id: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          message_id: string;
+          session_id: string;
+          user_id: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text: string;
+          corrected_text: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          message_id?: string;
+          session_id?: string;
+          user_id?: string;
+          kind?: Database["public"]["Enums"]["chat_correction_kind"];
+          source_text?: string;
+          corrected_text?: string;
+          explanation?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "scenario_corrections_message_id_fkey";
+            columns: ["message_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_messages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "scenario_corrections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "scenario_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
-      [_ in never]: never;
+      provider_usage_monthly: {
+        Row: {
+          month: string;
+          provider: string;
+          operation: string;
+          model: string | null;
+          succeeded_count: number;
+          failed_count: number;
+          audio_duration_ms_sum: number;
+          input_tokens_sum: number;
+          output_tokens_sum: number;
+          character_count_sum: number;
+          cost_micro_usd_sum: number;
+          cost_usd_sum: number;
+        };
+        Relationships: [];
+      };
+      lesson_processing_latency: {
+        Row: {
+          job_id: string;
+          lesson_id: string;
+          household_id: string;
+          status: Database["public"]["Enums"]["lesson_processing_status"];
+          attempt_count: number;
+          queued_at: string;
+          started_at: string | null;
+          finished_at: string | null;
+          failed_at: string | null;
+          error_summary: string | null;
+          latency_ms: number | null;
+          worker_latency_ms: number | null;
+          failure_latency_ms: number | null;
+        };
+        Relationships: [];
+      };
     };
     Functions: {
       current_household_id: {
@@ -1548,6 +1815,14 @@ export type Database = {
         Returns: string;
       };
       bump_chat_session_counters: {
+        Args: {
+          p_session_id: string;
+          p_message_increment?: number;
+          p_user_message_increment?: number;
+        };
+        Returns: undefined;
+      };
+      bump_scenario_session_counters: {
         Args: {
           p_session_id: string;
           p_message_increment?: number;

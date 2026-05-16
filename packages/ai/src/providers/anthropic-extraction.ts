@@ -1,5 +1,5 @@
 import type { ExtractionOutput } from "@reverb/domain";
-import { anthropicCompletion } from "./anthropic.js";
+import { anthropicCompletion, type AnthropicUsage } from "./anthropic.js";
 import {
   EXTRACTION_DEFAULT_MODEL,
   EXTRACTION_PROMPT_VERSION,
@@ -25,6 +25,8 @@ export type InferExtractionResult = {
   model: string;
   /** Prompt version stamped on the run; persisted on extraction_runs.prompt_version. */
   promptVersion: string;
+  /** Token counts reported by Anthropic, persisted on provider_usage_events. */
+  usage: AnthropicUsage;
 };
 
 // Extraction emits four categories of structured data, each potentially with
@@ -42,7 +44,7 @@ export async function inferExtractionWithAnthropic(
 ): Promise<InferExtractionResult> {
   const model = input.model ?? EXTRACTION_DEFAULT_MODEL;
   const userPrompt = buildExtractionUserPrompt(input);
-  const rawResponse = await anthropicCompletion({
+  const { text: rawResponse, usage } = await anthropicCompletion({
     model,
     system: EXTRACTION_SYSTEM_PROMPT,
     user: userPrompt,
@@ -59,5 +61,6 @@ export async function inferExtractionWithAnthropic(
     rawResponse,
     model,
     promptVersion: EXTRACTION_PROMPT_VERSION,
+    usage,
   };
 }

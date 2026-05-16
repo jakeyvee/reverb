@@ -38,13 +38,14 @@ export async function inferGrammarExercisesWithAnthropic(
 ): Promise<InferGrammarExercisesResult> {
   const model = input.model ?? GRAMMAR_EXERCISE_DEFAULT_MODEL;
   const userPrompt = buildGrammarExerciseUserPrompt(input);
-  const rawResponse = await anthropicCompletion({
+  const completion = await anthropicCompletion({
     model,
     system: GRAMMAR_EXERCISE_SYSTEM_PROMPT,
     user: userPrompt,
     maxTokens: MAX_TOKENS,
   });
 
+  const rawResponse = completion.text;
   const output = parseGrammarExerciseResponse(rawResponse, {
     patternId: input.patternId,
     language: input.language,

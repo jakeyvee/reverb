@@ -56,7 +56,11 @@ export async function loadDailySessionSummary(
     }
     const open = (itemRows ?? []).filter((row) => row.answered_at === null);
     const newCount = open.filter((row) => row.kind === "card").length;
-    const dueCount = open.filter((row) => row.kind === "mistake_drill").length;
+    // Mistake drills and shadowing clips both count as "due exercises" in the
+    // home tile — they're the non-card practice the user still owes today.
+    const dueCount = open.filter(
+      (row) => row.kind === "mistake_drill" || row.kind === "dialogue_clip",
+    ).length;
     return {
       status: "active",
       newCount,

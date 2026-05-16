@@ -1,6 +1,7 @@
 import { LESSON_AUDIO_BUCKET } from "@reverb/domain/schemas/upload";
 import { type LessonProcessingStatus } from "@reverb/domain/schemas/lesson-status";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { isDemoLessonMetadata } from "@/lib/lessons/demo";
 
 // 10 minutes is comfortably longer than a typical detail-page session without
 // over-extending the credential. The page is server-rendered, so every request
@@ -13,8 +14,11 @@ export type TranscriptSegmentRow = {
   startMs: number;
   endMs: number;
   speaker: string | null;
+  speakerLowPriority: boolean;
   language: string | null;
   text: string;
+  translation: string | null;
+  translationLanguage: string | null;
 };
 
 export type TranscriptAudio = {
@@ -47,6 +51,10 @@ export type LessonTranscriptView = {
     createdAt: string;
     sourceLanguage: string | null;
     targetLanguage: string | null;
+    // True when the row was inserted by the smoke-test seed (VOL-124). The
+    // detail page uses this to render a "Demo" badge and hide affordances
+    // (retry, reprocess) that can't apply to a pre-baked fixture.
+    isDemo: boolean;
   };
   job: {
     status: LessonProcessingStatus;
@@ -74,7 +82,9 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
 
   const { data: lessonRow, error: lessonError } = await supabase
     .from("lessons")
-    .select("id, title, description, duration_ms, created_at, source_language, target_language")
+    .select(
+      "id, title, description, duration_ms, created_at, source_language, target_language, metadata",
+    )
     .eq("id", lessonId)
     .maybeSingle();
 
@@ -99,7 +109,9 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
       .maybeSingle(),
     supabase
       .from("transcript_segments")
-      .select("id, segment_index, start_ms, end_ms, speaker, language, text")
+      .select(
+        "id, segment_index, start_ms, end_ms, speaker, speaker_low_priority, language, text, translation, translation_language",
+      )
       .eq("lesson_id", lessonId)
       .order("segment_index", { ascending: true }),
     supabase
@@ -123,8 +135,11 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
     startMs: row.start_ms,
     endMs: row.end_ms,
     speaker: row.speaker,
+    speakerLowPriority: Boolean(row.speaker_low_priority),
     language: row.language,
     text: row.text,
+    translation: row.translation,
+    translationLanguage: row.translation_language,
   }));
 
   let audio: TranscriptAudio | null = null;
@@ -180,6 +195,7 @@ export async function loadLessonTranscript(lessonId: string): Promise<LoadTransc
         createdAt: lessonRow.created_at,
         sourceLanguage: lessonRow.source_language,
         targetLanguage: lessonRow.target_language,
+        isDemo: isDemoLessonMetadata(lessonRow.metadata),
       },
       job: jobRow
         ? {

@@ -17,7 +17,11 @@ import {
 } from "./notifications.js";
 import { runStage, type StepHandlerMap, STEPS } from "./steps.js";
 import type { PipelineLogger } from "./logger.js";
-import { defaultPipelineServices, type PipelineServices } from "./services.js";
+import {
+  defaultPipelineServices,
+  type PipelineServices,
+  type ResolvedPipelineServices,
+} from "./services.js";
 import {
   ProcessLessonPayloadSchema,
   WORKER_STAGES,
@@ -51,7 +55,16 @@ export async function runLessonPipeline(input: RunPipelineInput): Promise<RunPip
   const payload = ProcessLessonPayloadSchema.parse(input.payload);
   const { supabase, logger, triggerRunId } = input;
   const steps = input.steps ?? STEPS;
-  const services = input.services ?? defaultPipelineServices(supabase);
+  // Fall back to a noop usage recorder when callers (mostly tests) don't
+  // inject one. Production goes through defaultPipelineServices() which wires
+  // the real `provider_usage_events` writer. Steps that depend on the
+  // recorder dereference `services.recordUsage` directly and would crash
+  // without this fill-in.
+  const baseServices = input.services ?? defaultPipelineServices(supabase);
+  const services: ResolvedPipelineServices = {
+    ...baseServices,
+    recordUsage: baseServices.recordUsage ?? (async () => {}),
+  };
   const emailCtx: EmailDispatchContext = {
     supabase,
     logger,

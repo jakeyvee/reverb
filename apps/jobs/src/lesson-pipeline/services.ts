@@ -18,6 +18,7 @@ import {
   type TranscribeAudioResult,
 } from "@reverb/ai";
 import { defaultLessonEmailer, type LessonEmailer } from "@reverb/email";
+import { createProviderUsageRecorder, type ProviderUsageRecorder } from "@reverb/db/usage";
 import type { MediaToolOptions } from "./media.js";
 import type { EmailRecipientResolver, VincentEmailResolver } from "./notifications.js";
 import type { ServiceClient } from "./state.js";
@@ -57,6 +58,19 @@ export type PipelineServices = {
   // Vincent's address for lesson_failed emails. Sourced from
   // VINCENT_UPLOAD_EMAIL in production; returned by a constant in tests.
   resolveVincentEmail: VincentEmailResolver;
+  // VOL-138 observability seam: writes one row per outbound provider call
+  // into public.provider_usage_events. Production wires the service-role
+  // client; tests inject a capturing stub to assert what each stage logged.
+  // Optional so unrelated tests can omit it; the orchestrator substitutes a
+  // no-op recorder when callers don't provide one.
+  recordUsage?: ProviderUsageRecorder;
+};
+
+// The shape the orchestrator and step handlers actually see — the optional
+// `recordUsage` on `PipelineServices` is filled in with a no-op by
+// `runLessonPipeline` so step bodies can call it unconditionally.
+export type ResolvedPipelineServices = Omit<PipelineServices, "recordUsage"> & {
+  recordUsage: ProviderUsageRecorder;
 };
 
 // Production Supabase auth admin lookup. Service role required — the worker
@@ -95,5 +109,6 @@ export function defaultPipelineServices(supabase: ServiceClient): PipelineServic
     emailer: defaultLessonEmailer(),
     resolveRecipientEmail: createAuthAdminRecipientResolver(supabase),
     resolveVincentEmail: defaultVincentEmailResolver(),
+    recordUsage: createProviderUsageRecorder(supabase),
   };
 }
