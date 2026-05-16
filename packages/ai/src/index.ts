@@ -1,3 +1,4 @@
+export * from "./pricing.js";
 export * from "./providers/groq.js";
 export * from "./providers/groq-whisper.js";
 export * from "./providers/anthropic.js";

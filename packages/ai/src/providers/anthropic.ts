@@ -8,6 +8,15 @@ export function getAnthropicClient(): Anthropic {
   return cached;
 }
 
+// Captured from the Anthropic response.usage envelope so downstream code can
+// log token counts onto provider_usage_events without re-reading the raw
+// payload. Cache + ephemeral tokens are tracked separately in the SDK; for
+// the cost-guardrail use case we only need the bill-driving fields.
+export interface AnthropicUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface AnthropicCompletionInput {
   model: string;
   system?: string;
@@ -15,7 +24,14 @@ export interface AnthropicCompletionInput {
   maxTokens?: number;
 }
 
-export async function anthropicCompletion(input: AnthropicCompletionInput): Promise<string> {
+export interface AnthropicCompletionResult {
+  text: string;
+  usage: AnthropicUsage;
+}
+
+export async function anthropicCompletion(
+  input: AnthropicCompletionInput,
+): Promise<AnthropicCompletionResult> {
   const client = getAnthropicClient();
   const response = await client.messages.create({
     model: input.model,
@@ -24,7 +40,13 @@ export async function anthropicCompletion(input: AnthropicCompletionInput): Prom
     messages: [{ role: "user", content: input.user }],
   });
   const first = response.content[0];
-  return first && first.type === "text" ? first.text : "";
+  return {
+    text: first && first.type === "text" ? first.text : "",
+    usage: {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    },
+  };
 }
 
 export interface AnthropicChatTurnInput {
@@ -46,7 +68,7 @@ export interface AnthropicChatCompletionInput {
 // contract so callers can share parsing code.
 export async function anthropicChatCompletion(
   input: AnthropicChatCompletionInput,
-): Promise<string> {
+): Promise<AnthropicCompletionResult> {
   const client = getAnthropicClient();
   const response = await client.messages.create({
     model: input.model,
@@ -55,5 +77,11 @@ export async function anthropicChatCompletion(
     messages: input.messages.map((turn) => ({ role: turn.role, content: turn.content })),
   });
   const first = response.content[0];
-  return first && first.type === "text" ? first.text : "";
+  return {
+    text: first && first.type === "text" ? first.text : "",
+    usage: {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    },
+  };
 }

@@ -1,5 +1,5 @@
 import type { ChatAssistantResponse, ChatConversationContext, ChatTurn } from "@reverb/domain";
-import { anthropicChatCompletion } from "./anthropic.js";
+import { anthropicChatCompletion, type AnthropicUsage } from "./anthropic.js";
 import {
   CONVERSATION_DEFAULT_MODEL,
   CONVERSATION_MAX_TOKENS,
@@ -33,6 +33,8 @@ export type InferConversationResult = {
   model: string;
   /** Prompt version stamped on the turn; persisted for replay. */
   promptVersion: string;
+  /** Token counts reported by Anthropic, persisted on provider_usage_events. */
+  usage: AnthropicUsage;
 };
 
 export async function inferConversationWithAnthropic(
@@ -42,7 +44,7 @@ export async function inferConversationWithAnthropic(
   const system = buildConversationSystemPrompt(input.context);
   const messages = buildConversationMessages(input.history, input.userMessage);
 
-  const rawResponse = await anthropicChatCompletion({
+  const { text: rawResponse, usage } = await anthropicChatCompletion({
     model,
     system,
     messages,
@@ -55,5 +57,6 @@ export async function inferConversationWithAnthropic(
     rawResponse,
     model,
     promptVersion: CONVERSATION_PROMPT_VERSION,
+    usage,
   };
 }

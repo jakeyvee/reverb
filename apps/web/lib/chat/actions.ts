@@ -1,7 +1,11 @@
 "use server";
 
 import { z } from "zod";
-import { inferConversationWithAnthropic } from "@reverb/ai";
+import {
+  ANTHROPIC_CONVERSATION_PROVIDER_ID,
+  estimateCostMicroUsd,
+  inferConversationWithAnthropic,
+} from "@reverb/ai";
 import {
   CHAT_HISTORY_WINDOW,
   CHAT_USER_MESSAGE_MAX_CHARS,
@@ -9,7 +13,9 @@ import {
   type ChatCorrection,
   type ChatLevel,
 } from "@reverb/domain";
+import { createServiceRoleClient } from "@reverb/db/server";
 import type { TablesInsert } from "@reverb/db/types";
+import { createProviderUsageRecorder } from "@reverb/db/usage";
 import { requireUser } from "@/lib/auth/get-user";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import {
@@ -100,6 +106,13 @@ export async function sendChatMessageAction(
     return { ok: false, error: messageOf(error) };
   }
 
+  // VOL-138: record every Anthropic chat call into provider_usage_events so
+  // chat spend rolls up alongside the lesson pipeline's costs. The recorder
+  // is built from the service-role client because the table has no INSERT
+  // policy for authenticated users (telemetry crosses households and must
+  // not be reachable from a client session).
+  const recordUsage = createProviderUsageRecorder(createServiceRoleClient());
+  const inferenceStartedAt = Date.now();
   let inference;
   try {
     inference = await inferConversationWithAnthropic({
@@ -108,8 +121,42 @@ export async function sendChatMessageAction(
       userMessage: trimmedMessage,
     });
   } catch (error) {
+    await recordUsage({
+      provider: ANTHROPIC_CONVERSATION_PROVIDER_ID,
+      operation: "llm",
+      surface: "chat",
+      userId: user.id,
+      status: "failed",
+      latencyMs: Date.now() - inferenceStartedAt,
+      error: messageOf(error),
+      metadata: {
+        session_id: session.id,
+        level,
+      },
+    });
     return { ok: false, error: messageOf(error) };
   }
+  await recordUsage({
+    provider: ANTHROPIC_CONVERSATION_PROVIDER_ID,
+    operation: "llm",
+    surface: "chat",
+    userId: user.id,
+    model: inference.model,
+    inputTokens: inference.usage.inputTokens,
+    outputTokens: inference.usage.outputTokens,
+    latencyMs: Date.now() - inferenceStartedAt,
+    costMicroUsd: estimateCostMicroUsd({
+      provider: "anthropic-conversation",
+      model: inference.model,
+      inputTokens: inference.usage.inputTokens,
+      outputTokens: inference.usage.outputTokens,
+    }),
+    metadata: {
+      session_id: session.id,
+      prompt_version: inference.promptVersion,
+      level,
+    },
+  });
 
   // Insert user message first so the assistant message + corrections can
   // reference its id, then insert the assistant turn, then the corrections
