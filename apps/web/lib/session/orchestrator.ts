@@ -9,6 +9,14 @@ import {
   loadNextGrammarExercise,
   type SessionGrammarExercise,
 } from "./grammar-exercises";
+import {
+  DEFAULT_LISTENING_LIMIT,
+  assignListeningPrompts,
+  loadListeningClipCandidates,
+  parseListeningPromptFromMetadata,
+  type ListeningItemView,
+  type ListeningPrompt,
+} from "./listening-comprehension";
 
 // VOL-121: Daily session orchestrator.
 //
@@ -25,6 +33,10 @@ import {
 
 const DEFAULT_DRILL_LIMIT = 8;
 const DEFAULT_VOCAB_LIMIT = 12;
+// Listening items are heavier (audio + multi-part prompt), so the default
+// budget per session stays modest. Override via StartOrResumeOptions for
+// tests or future tuning.
+const DEFAULT_LISTENING_SESSION_LIMIT = DEFAULT_LISTENING_LIMIT;
 
 export const VOCAB_REVIEW_XP_PER_GOOD_RATING = 3;
 // Vocab is awarded by rating. Again rates 0 because the user got it wrong;
@@ -41,8 +53,9 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 }
 
 // Pure assembly of the queue order. Pulled out so the rule (mistake drills
-// always slot ahead of grammar, grammar before vocab, ordering inside each
-// kind is preserved from the loader) lives in one testable place.
+// always slot ahead of grammar, grammar before vocab, listening items trail
+// at the end, ordering inside each kind is preserved from the loader) lives
+// in one testable place.
 //
 // VOL-129 added the grammar slot. We aim for one grammar exercise per
 // session, inserted between mistake drills and vocab reviews so it never
@@ -50,25 +63,32 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 export type AssembledItem =
   | { kind: "mistake_drill"; correctionDrillId: string }
   | { kind: "grammar_exercise"; grammarExerciseId: string }
-  | { kind: "card"; cardId: string };
+  | { kind: "card"; cardId: string }
+  | { kind: "listening_comprehension"; clipId: string; prompt: ListeningPrompt };
 
 export function assembleSessionQueue(args: {
   corrections: ReadonlyArray<{ drillId: string }>;
-  grammarExercises: ReadonlyArray<{ exerciseId: string }>;
+  grammarExercises?: ReadonlyArray<{ exerciseId: string }>;
   vocabCards: ReadonlyArray<{ cardId: string }>;
+  listening?: ReadonlyArray<{ clipId: string; prompt: ListeningPrompt }>;
 }): AssembledItem[] {
   return [
     ...args.corrections.map<AssembledItem>((drill) => ({
       kind: "mistake_drill",
       correctionDrillId: drill.drillId,
     })),
-    ...args.grammarExercises.map<AssembledItem>((exercise) => ({
+    ...(args.grammarExercises ?? []).map<AssembledItem>((exercise) => ({
       kind: "grammar_exercise",
       grammarExerciseId: exercise.exerciseId,
     })),
     ...args.vocabCards.map<AssembledItem>((card) => ({
       kind: "card",
       cardId: card.cardId,
+    })),
+    ...(args.listening ?? []).map<AssembledItem>((entry) => ({
+      kind: "listening_comprehension",
+      clipId: entry.clipId,
+      prompt: entry.prompt,
     })),
   ];
 }
@@ -100,6 +120,13 @@ export type SessionItem =
       kind: "card";
       completed: boolean;
       card: ReviewableVocabCard;
+    }
+  | {
+      sessionItemId: string;
+      position: number;
+      kind: "listening_comprehension";
+      completed: boolean;
+      listening: ListeningItemView;
     };
 
 export type DailySessionView = {
@@ -121,6 +148,7 @@ export type StartOrResumeOptions = {
   now?: Date;
   drillLimit?: number;
   vocabLimit?: number;
+  listeningLimit?: number;
 };
 
 // Entry point for the /session page and the "Start Today's Session" CTA.
@@ -154,19 +182,25 @@ export async function startOrResumeTodaysSession(
     // queue stay in place.
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
-      const { drills, grammarExercise, vocabCards } = await loadCandidateQueue(supabase, userId, {
-        now,
-        drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
-        vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
-      });
+      const { drills, grammarExercise, vocabCards, listening } = await loadCandidateQueue(
+        supabase,
+        userId,
+        {
+          now,
+          drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
+          vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+          listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
+        },
+      );
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
         grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
         vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
+        listening,
       });
       if (assembled.length > 0) {
         const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
-          buildSessionItemRow(existing.id, userId, index, item),
+          buildSessionItemInsert(existing.id, userId, index, item),
         );
         const { error } = await supabase.from("practice_session_items").insert(itemRows);
         if (error) {
@@ -183,16 +217,22 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, grammarExercise, vocabCards } = await loadCandidateQueue(supabase, userId, {
-    now,
-    drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
-    vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
-  });
+  const { drills, grammarExercise, vocabCards, listening } = await loadCandidateQueue(
+    supabase,
+    userId,
+    {
+      now,
+      drillLimit: options.drillLimit ?? DEFAULT_DRILL_LIMIT,
+      vocabLimit: options.vocabLimit ?? DEFAULT_VOCAB_LIMIT,
+      listeningLimit: options.listeningLimit ?? DEFAULT_LISTENING_SESSION_LIMIT,
+    },
+  );
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
     grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
     vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
+    listening,
   });
 
   const sessionRow: TablesInsert<"practice_sessions"> = {
@@ -216,7 +256,7 @@ export async function startOrResumeTodaysSession(
 
   if (assembled.length > 0) {
     const itemRows: TablesInsert<"practice_session_items">[] = assembled.map((item, index) =>
-      buildSessionItemRow(insertedSession.id, userId, index, item),
+      buildSessionItemInsert(insertedSession.id, userId, index, item),
     );
     const { error: itemsError } = await supabase.from("practice_session_items").insert(itemRows);
     if (itemsError) {
@@ -227,7 +267,17 @@ export async function startOrResumeTodaysSession(
   await appendPracticeEvent(supabase, userId, {
     session_id: insertedSession.id,
     kind: "session_start",
-    payload: { item_count: assembled.length, source: "daily_orchestrator" },
+    payload: {
+      item_count: assembled.length,
+      source: "daily_orchestrator",
+      kinds: {
+        mistake_drill: assembled.filter((item) => item.kind === "mistake_drill").length,
+        grammar_exercise: assembled.filter((item) => item.kind === "grammar_exercise").length,
+        card: assembled.filter((item) => item.kind === "card").length,
+        listening_comprehension: assembled.filter((item) => item.kind === "listening_comprehension")
+          .length,
+      },
+    },
   });
 
   return hydrateSession(supabase, userId, insertedSession);
@@ -268,14 +318,15 @@ async function findActiveSessionForDay(
 async function loadCandidateQueue(
   supabase: SupabaseClient<Database>,
   userId: string,
-  args: { now: Date; drillLimit: number; vocabLimit: number },
+  args: { now: Date; drillLimit: number; vocabLimit: number; listeningLimit: number },
 ): Promise<{
   drills: CorrectionDrillView[];
   grammarExercise: SessionGrammarExercise | null;
   vocabCards: ReviewableVocabCard[];
+  listening: Array<{ clipId: string; prompt: ListeningPrompt }>;
 }> {
   const nowIso = args.now.toISOString();
-  const [drillResp, vocab, grammarExercise] = await Promise.all([
+  const [drillResp, vocab, grammarExercise, listeningCandidates] = await Promise.all([
     supabase
       .from("correction_drills")
       .select(
@@ -291,10 +342,14 @@ async function loadCandidateQueue(
     // the most recent unseen one (or null if the user has no eligible
     // exercises, in which case we just skip the slot).
     loadNextGrammarExercise(supabase, userId),
+    loadListeningClipCandidates(supabase, { limit: Math.max(args.listeningLimit * 3, 6) }),
   ]);
   if (drillResp.error) {
     throw new Error(`Could not load drill candidates: ${drillResp.error.message}`);
   }
+  const listening = assignListeningPrompts(listeningCandidates, {
+    limit: args.listeningLimit,
+  }).map((entry) => ({ clipId: entry.clip.clipId, prompt: entry.prompt }));
   const drills: CorrectionDrillView[] = [];
   for (const row of drillResp.data ?? []) {
     const correction = Array.isArray(row.teacher_correction)
@@ -325,28 +380,54 @@ async function loadCandidateQueue(
       confidenceTier: tier,
     });
   }
-  return { drills, grammarExercise, vocabCards: vocab };
+  return { drills, grammarExercise, vocabCards: vocab, listening };
 }
 
-// Build a single `practice_session_items` insert payload for one
-// AssembledItem. Centralised because each kind has its own FK column and
-// the check constraint on the table requires exactly one of them set —
-// it's easy to forget which kind nulls which when assembling rows inline.
-function buildSessionItemRow(
+// Maps an assembled item into the practice_session_items insert row. The
+// kind column lines up with the per-item FK as enforced by
+// enforce_practice_session_item_target; listening items reuse the
+// `dialogue_clip` kind + FK and carry the generated prompt in `metadata`.
+function buildSessionItemInsert(
   sessionId: string,
   userId: string,
   position: number,
   item: AssembledItem,
 ): TablesInsert<"practice_session_items"> {
-  return {
-    session_id: sessionId,
-    user_id: userId,
-    position,
-    kind: item.kind,
-    card_id: item.kind === "card" ? item.cardId : null,
-    correction_drill_id: item.kind === "mistake_drill" ? item.correctionDrillId : null,
-    grammar_exercise_id: item.kind === "grammar_exercise" ? item.grammarExerciseId : null,
-  };
+  switch (item.kind) {
+    case "mistake_drill":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "mistake_drill",
+        correction_drill_id: item.correctionDrillId,
+      };
+    case "grammar_exercise":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "grammar_exercise",
+        grammar_exercise_id: item.grammarExerciseId,
+      };
+    case "card":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "card",
+        card_id: item.cardId,
+      };
+    case "listening_comprehension":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "dialogue_clip",
+        dialogue_clip_id: item.clipId,
+        metadata: { listening: item.prompt },
+      };
+  }
 }
 
 // Hydrate a session row + its items into the view model the UI consumes.
@@ -361,7 +442,7 @@ async function hydrateSession(
   const { data: itemRows, error: itemsError } = await supabase
     .from("practice_session_items")
     .select(
-      "id, position, kind, card_id, correction_drill_id, grammar_exercise_id, answered_at, rating, correct, response_ms",
+      "id, position, kind, card_id, correction_drill_id, grammar_exercise_id, dialogue_clip_id, answered_at, rating, correct, response_ms, metadata",
     )
     .eq("session_id", session.id)
     .order("position", { ascending: true });
@@ -372,6 +453,7 @@ async function hydrateSession(
   const drillIds: string[] = [];
   const cardIds: string[] = [];
   const grammarExerciseIds: string[] = [];
+  const listeningClipIds: string[] = [];
   for (const row of rows) {
     if (row.kind === "mistake_drill" && row.correction_drill_id) {
       drillIds.push(row.correction_drill_id);
@@ -379,15 +461,20 @@ async function hydrateSession(
       cardIds.push(row.card_id);
     } else if (row.kind === "grammar_exercise" && row.grammar_exercise_id) {
       grammarExerciseIds.push(row.grammar_exercise_id);
+    } else if (row.kind === "dialogue_clip" && row.dialogue_clip_id) {
+      listeningClipIds.push(row.dialogue_clip_id);
     }
   }
 
-  const [drillsById, cardsById, grammarById] = await Promise.all([
+  const [drillsById, cardsById, grammarById, listeningById] = await Promise.all([
     drillIds.length > 0 ? loadDrillsByIds(supabase, userId, drillIds) : new Map(),
     cardIds.length > 0 ? loadCardsByIds(supabase, userId, cardIds) : new Map(),
     grammarExerciseIds.length > 0
       ? loadGrammarExercisesByIds(supabase, grammarExerciseIds)
       : new Map<string, SessionGrammarExercise>(),
+    listeningClipIds.length > 0
+      ? loadListeningClipsByIds(supabase, listeningClipIds)
+      : new Map<string, ListeningClipHydration>(),
   ]);
 
   const items: SessionItem[] = [];
@@ -434,9 +521,33 @@ async function hydrateSession(
         completed: row.answered_at !== null,
         exercise,
       });
+    } else if (row.kind === "dialogue_clip") {
+      const hydration = row.dialogue_clip_id ? listeningById.get(row.dialogue_clip_id) : undefined;
+      const prompt = parseListeningPromptFromMetadata(row.metadata);
+      if (!hydration || !prompt) {
+        // Either the source clip vanished (set null on delete) or the
+        // row was written by a different subsystem and lacks our prompt
+        // metadata. Either way, drop it without failing the page.
+        unresolved += 1;
+        continue;
+      }
+      items.push({
+        sessionItemId: row.id,
+        position: row.position,
+        kind: "listening_comprehension",
+        completed: row.answered_at !== null,
+        listening: {
+          clipId: hydration.clipId,
+          lessonId: hydration.lessonId,
+          lessonTitle: hydration.lessonTitle,
+          audioUrl: hydration.audioUrl,
+          durationMs: hydration.durationMs,
+          prompt,
+        },
+      });
     } else {
-      // Unknown kind (dialogue_clip placeholders, future kinds). Drop from
-      // the queue rather than failing the whole page.
+      // Unknown kind (future kinds we haven't taught the runner about).
+      // Drop rather than failing the whole page.
       unresolved += 1;
     }
   }
@@ -497,6 +608,82 @@ async function loadDrillsByIds(
     });
   }
   return out;
+}
+
+type ListeningClipHydration = {
+  clipId: string;
+  lessonId: string;
+  lessonTitle: string | null;
+  audioUrl: string | null;
+  durationMs: number;
+};
+
+async function loadListeningClipsByIds(
+  supabase: SupabaseClient<Database>,
+  ids: string[],
+): Promise<Map<string, ListeningClipHydration>> {
+  const { data, error } = await supabase
+    .from("dialogue_clips")
+    .select("id, lesson_id, start_ms, end_ms, storage_bucket, storage_path")
+    .in("id", ids);
+  if (error) {
+    throw new Error(`Could not load dialogue_clips: ${error.message}`);
+  }
+  const rows = data ?? [];
+  if (rows.length === 0) return new Map();
+
+  const lessonTitleById = await resolveDialogueLessonTitles(
+    supabase,
+    rows.map((row) => row.lesson_id),
+  );
+  const signedUrlByPath = await signListeningClipAudio(supabase, rows);
+
+  const out = new Map<string, ListeningClipHydration>();
+  for (const row of rows) {
+    out.set(row.id, {
+      clipId: row.id,
+      lessonId: row.lesson_id,
+      lessonTitle: lessonTitleById.get(row.lesson_id) ?? null,
+      audioUrl: signedUrlByPath.get(`${row.storage_bucket}:${row.storage_path}`) ?? null,
+      durationMs: Math.max(0, row.end_ms - row.start_ms),
+    });
+  }
+  return out;
+}
+
+async function signListeningClipAudio(
+  supabase: SupabaseClient<Database>,
+  rows: ReadonlyArray<{ storage_bucket: string; storage_path: string }>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const results = await Promise.all(
+    rows.map(async (row) => {
+      if (!SUPPORTED_AUDIO_BUCKETS.has(row.storage_bucket)) return null;
+      const { data, error } = await supabase.storage
+        .from(row.storage_bucket)
+        .createSignedUrl(row.storage_path, AUDIO_SIGNED_URL_TTL_SECONDS);
+      if (error || !data?.signedUrl) return null;
+      return { key: `${row.storage_bucket}:${row.storage_path}`, url: data.signedUrl };
+    }),
+  );
+  for (const result of results) {
+    if (result) out.set(result.key, result.url);
+  }
+  return out;
+}
+
+async function resolveDialogueLessonTitles(
+  supabase: SupabaseClient<Database>,
+  lessonIds: ReadonlyArray<string>,
+): Promise<Map<string, string>> {
+  const ids = new Set(lessonIds);
+  if (ids.size === 0) return new Map();
+  const { data, error } = await supabase
+    .from("lessons")
+    .select("id, title")
+    .in("id", Array.from(ids));
+  if (error || !data) return new Map();
+  return new Map(data.map((row) => [row.id, row.title] as const));
 }
 
 async function loadCardsByIds(

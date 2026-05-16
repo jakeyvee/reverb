@@ -8,6 +8,7 @@ import type { DailySessionView, SessionItem } from "@/lib/session/orchestrator";
 import { SessionVocabCard } from "@/components/session/vocab-card";
 import { SessionDrillCard } from "@/components/session/drill-card";
 import { SessionGrammarCard } from "@/components/session/grammar-exercise-card";
+import { SessionListeningCard } from "@/components/session/listening-card";
 
 // Orchestrates today's mixed session. The hydrated view is fetched on the
 // server and persisted in `practice_session_items`, so the order on the
@@ -277,6 +278,28 @@ function SessionItemView({
       />
     );
   }
+  if (item.kind === "listening_comprehension") {
+    return (
+      <SessionListeningCard
+        key={item.sessionItemId}
+        listening={item.listening}
+        sessionItemId={item.sessionItemId}
+        positionLabel={positionLabel}
+        onAnswered={(result) => {
+          if (result.ok && result.session) {
+            onAnswered(item.sessionItemId, {
+              sessionXpEarned: result.session.sessionXpEarned,
+              cardsReviewed: result.session.cardsReviewed,
+              exercisesAttempted: result.session.exercisesAttempted,
+            });
+          } else if (result.ok) {
+            onAnswered(item.sessionItemId);
+          }
+        }}
+        onAdvance={onAdvance}
+      />
+    );
+  }
   return (
     <SessionDrillCard
       key={item.sessionItemId}
@@ -354,6 +377,11 @@ function CompletionSummary({
         Longest streak: {summary.streak.longestLength} day
         {summary.streak.longestLength === 1 ? "" : "s"}.
       </p>
+      {result.partnerNudge ? (
+        <p className="mt-2 max-w-xs rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-xs text-foreground-muted">
+          {result.partnerNudge}
+        </p>
+      ) : null}
     </Card>
   );
 }

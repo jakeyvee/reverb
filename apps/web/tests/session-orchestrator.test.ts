@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { assembleSessionQueue, xpForVocabRating } from "@/lib/session/orchestrator";
+import type { ListeningPrompt } from "@/lib/session/listening-comprehension";
+
+const transcriptionPrompt: ListeningPrompt = {
+  kind: "transcription",
+  question: "Type what you heard.",
+  choices: [],
+  answerIndex: null,
+  expectedText: "Selamat pagi.",
+};
 
 // Pure-function coverage for the orchestrator. The end-to-end DB flow is
 // exercised in integration runs against a Supabase instance; these tests
@@ -73,6 +82,45 @@ describe("assembleSessionQueue", () => {
     expect(
       assembleSessionQueue({ corrections: [], grammarExercises: [], vocabCards: [] }),
     ).toEqual([]);
+  });
+
+  it("places listening comprehension items after vocab cards when supplied", () => {
+    const queue = assembleSessionQueue({
+      corrections: [{ drillId: "drill-a" }],
+      vocabCards: [{ cardId: "card-1" }],
+      listening: [{ clipId: "clip-1", prompt: transcriptionPrompt }],
+    });
+    expect(queue.map((entry) => entry.kind)).toEqual([
+      "mistake_drill",
+      "card",
+      "listening_comprehension",
+    ]);
+    expect(queue[2]).toMatchObject({
+      kind: "listening_comprehension",
+      clipId: "clip-1",
+    });
+  });
+
+  it("omits the listening section when no clips are supplied", () => {
+    const queue = assembleSessionQueue({
+      corrections: [],
+      vocabCards: [{ cardId: "card-1" }],
+    });
+    expect(queue).toEqual([{ kind: "card", cardId: "card-1" }]);
+  });
+
+  it("returns a listening-only queue when there are no drills or cards", () => {
+    const queue = assembleSessionQueue({
+      corrections: [],
+      vocabCards: [],
+      listening: [
+        { clipId: "clip-1", prompt: transcriptionPrompt },
+        { clipId: "clip-2", prompt: transcriptionPrompt },
+      ],
+    });
+    expect(queue).toHaveLength(2);
+    expect(queue[0]).toMatchObject({ kind: "listening_comprehension", clipId: "clip-1" });
+    expect(queue[1]).toMatchObject({ kind: "listening_comprehension", clipId: "clip-2" });
   });
 });
 
