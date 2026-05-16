@@ -68,6 +68,12 @@ export interface TranscribeAudioResult {
   rawResponse: GroqVerboseTranscription;
   /** Model id actually used for this run. */
   model: string;
+  /**
+   * Audio duration (ms) Whisper reported back. Drives cost estimation and the
+   * provider_usage_events.audio_duration_ms column. NULL when the response
+   * omitted `duration`.
+   */
+  audioDurationMs: number | null;
 }
 
 const DEFAULT_FILE_NAME = "lesson.mp3";
@@ -110,8 +116,10 @@ export async function transcribeAudioWithGroq(
     language: input.language,
     model,
   });
+  const audioDurationMs =
+    typeof parsedRaw.duration === "number" ? Math.round(parsedRaw.duration * 1000) : null;
 
-  return { transcript, rawResponse: parsedRaw, model };
+  return { transcript, rawResponse: parsedRaw, model, audioDurationMs };
 }
 
 export interface MapGroqVerboseToTranscriptOptions {

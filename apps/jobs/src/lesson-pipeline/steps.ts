@@ -1,9 +1,13 @@
 import {
+  ANTHROPIC_DIARIZATION_PROVIDER_ID,
+  ANTHROPIC_EXTRACTION_PROVIDER_ID,
   DEFAULT_INDONESIAN_VOICE,
   DIARIZATION_PROMPT_VERSION,
   EXTRACTION_RUN_KINDS,
   GOOGLE_TTS_PROVIDER_ID,
+  GROQ_WHISPER_PROVIDER_ID,
   INDONESIAN_LANGUAGE_CODE,
+  estimateCostMicroUsd,
 } from "@reverb/ai";
 import type { Json, TablesInsert } from "@reverb/db/types";
 import { generateVocabAudioForLesson } from "./tts.js";
@@ -19,7 +23,7 @@ import { LESSON_CLIPS_BUCKET, dialogueClipPath } from "@reverb/media";
 import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
 import type { PipelineLogger } from "./logger.js";
-import type { PipelineServices } from "./services.js";
+import type { ResolvedPipelineServices } from "./services.js";
 import { materializeDialogueClips } from "./clip-generation.js";
 import { WORKER_STAGES, type WorkerStage } from "./types.js";
 
@@ -41,7 +45,7 @@ export type StepContext = {
   supabase: ServiceClient;
   job: JobRow;
   source: SourceAudio;
-  services: PipelineServices;
+  services: ResolvedPipelineServices;
   logger: PipelineLogger;
 };
 
@@ -67,11 +71,47 @@ async function transcribingStep(ctx: StepContext): Promise<StepResult> {
     language,
   });
 
-  const { transcript, rawResponse, model } = await services.transcribe({
-    audioUrl: source.signedUrl,
-    language,
-    sourceId: job.lesson_id,
-    fileName: defaultFileNameFromPath(source.storagePath),
+  const startedAt = Date.now();
+  let transcribeResult;
+  try {
+    transcribeResult = await services.transcribe({
+      audioUrl: source.signedUrl,
+      language,
+      sourceId: job.lesson_id,
+      fileName: defaultFileNameFromPath(source.storagePath),
+    });
+  } catch (err) {
+    await services.recordUsage({
+      provider: GROQ_WHISPER_PROVIDER_ID,
+      operation: "asr",
+      surface: "lesson-pipeline.transcribing",
+      lessonId: job.lesson_id,
+      status: "failed",
+      audioDurationMs: source.durationMs,
+      latencyMs: Date.now() - startedAt,
+      error: describeProviderError(err),
+    });
+    throw err;
+  }
+  const { transcript, rawResponse, model, audioDurationMs } = transcribeResult;
+  const billedDurationMs = audioDurationMs ?? source.durationMs;
+  await services.recordUsage({
+    provider: GROQ_WHISPER_PROVIDER_ID,
+    operation: "asr",
+    surface: "lesson-pipeline.transcribing",
+    model,
+    lessonId: job.lesson_id,
+    audioDurationMs: billedDurationMs,
+    latencyMs: Date.now() - startedAt,
+    costMicroUsd:
+      billedDurationMs != null
+        ? estimateCostMicroUsd({
+            provider: "groq-whisper",
+            model,
+            audioDurationMs: billedDurationMs,
+          })
+        : null,
+    metadata: { language },
   });
 
   const persisted = await persistTranscript(supabase, job.lesson_id, transcript);
@@ -236,10 +276,49 @@ async function diarizingStep(ctx: StepContext): Promise<StepResult> {
     language,
   });
 
-  const { diarization, model, promptVersion, rawResponse } = await services.diarize({
-    sourceTranscriptId: job.lesson_id,
-    language,
-    segments: inputSegments,
+  const diarizeStartedAt = Date.now();
+  let diarizeResult;
+  try {
+    diarizeResult = await services.diarize({
+      sourceTranscriptId: job.lesson_id,
+      language,
+      segments: inputSegments,
+    });
+  } catch (err) {
+    await services.recordUsage({
+      provider: ANTHROPIC_DIARIZATION_PROVIDER_ID,
+      operation: "llm",
+      surface: "lesson-pipeline.diarizing",
+      lessonId: job.lesson_id,
+      status: "failed",
+      latencyMs: Date.now() - diarizeStartedAt,
+      error: describeProviderError(err),
+      metadata: { language, segment_count: inputSegments.length },
+    });
+    throw err;
+  }
+  const { diarization, model, promptVersion, rawResponse } = diarizeResult;
+  const usage = diarizeResult.usage ?? { inputTokens: 0, outputTokens: 0 };
+  await services.recordUsage({
+    provider: ANTHROPIC_DIARIZATION_PROVIDER_ID,
+    operation: "llm",
+    surface: "lesson-pipeline.diarizing",
+    model,
+    lessonId: job.lesson_id,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    latencyMs: Date.now() - diarizeStartedAt,
+    costMicroUsd: estimateCostMicroUsd({
+      provider: "anthropic-diarization",
+      model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    }),
+    metadata: {
+      prompt_version: promptVersion,
+      language,
+      segment_count: inputSegments.length,
+    },
   });
 
   const labelByDbId = mapLabelsToSegmentIds(diarization, idByPromptId);
@@ -1201,10 +1280,49 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
     language,
   });
 
-  const { extraction, model, promptVersion } = await services.extract({
-    sourceTranscriptId: job.lesson_id,
-    language,
-    segments: promptSegments,
+  const extractStartedAt = Date.now();
+  let extractResult;
+  try {
+    extractResult = await services.extract({
+      sourceTranscriptId: job.lesson_id,
+      language,
+      segments: promptSegments,
+    });
+  } catch (err) {
+    await services.recordUsage({
+      provider: ANTHROPIC_EXTRACTION_PROVIDER_ID,
+      operation: "llm",
+      surface: "lesson-pipeline.extracting",
+      lessonId: job.lesson_id,
+      status: "failed",
+      latencyMs: Date.now() - extractStartedAt,
+      error: describeProviderError(err),
+      metadata: { language, segment_count: promptSegments.length },
+    });
+    throw err;
+  }
+  const { extraction, model, promptVersion } = extractResult;
+  const extractUsage = extractResult.usage ?? { inputTokens: 0, outputTokens: 0 };
+  await services.recordUsage({
+    provider: ANTHROPIC_EXTRACTION_PROVIDER_ID,
+    operation: "llm",
+    surface: "lesson-pipeline.extracting",
+    model,
+    lessonId: job.lesson_id,
+    inputTokens: extractUsage.inputTokens,
+    outputTokens: extractUsage.outputTokens,
+    latencyMs: Date.now() - extractStartedAt,
+    costMicroUsd: estimateCostMicroUsd({
+      provider: "anthropic-extraction",
+      model,
+      inputTokens: extractUsage.inputTokens,
+      outputTokens: extractUsage.outputTokens,
+    }),
+    metadata: {
+      prompt_version: promptVersion,
+      language,
+      segment_count: promptSegments.length,
+    },
   });
 
   const extractedAt = new Date().toISOString();
@@ -1299,6 +1417,7 @@ async function generatingAudioStep(ctx: StepContext): Promise<StepResult> {
     supabase,
     synthesize: services.synthesize,
     logger,
+    recordUsage: services.recordUsage,
     lessonId: lesson.id,
     householdId: lesson.household_id,
     voiceName: DEFAULT_INDONESIAN_VOICE,
@@ -1330,6 +1449,16 @@ async function generatingAudioStep(ctx: StepContext): Promise<StepResult> {
       failed_count: summary.failedCount,
     },
   };
+}
+
+// Compact error description shared by every provider-failure recorder branch.
+// Keeps the failed-row's `error` column short while the full stack remains in
+// worker logs.
+function describeProviderError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message.length > 240 ? `${err.message.slice(0, 237)}…` : err.message;
+  }
+  return typeof err === "string" ? err : "Unknown provider error";
 }
 
 export type StepHandlerMap = Record<WorkerStage, StepHandler>;

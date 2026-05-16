@@ -1487,6 +1487,84 @@ export type Database = {
           },
         ];
       };
+      provider_usage_events: {
+        Row: {
+          id: string;
+          household_id: string | null;
+          user_id: string | null;
+          lesson_id: string | null;
+          provider: string;
+          operation: string;
+          model: string | null;
+          surface: string;
+          status: string;
+          audio_duration_ms: number | null;
+          input_tokens: number | null;
+          output_tokens: number | null;
+          character_count: number | null;
+          latency_ms: number | null;
+          cost_micro_usd: number | null;
+          error: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          household_id?: string | null;
+          user_id?: string | null;
+          lesson_id?: string | null;
+          provider: string;
+          operation: string;
+          model?: string | null;
+          surface: string;
+          status?: string;
+          audio_duration_ms?: number | null;
+          input_tokens?: number | null;
+          output_tokens?: number | null;
+          character_count?: number | null;
+          latency_ms?: number | null;
+          cost_micro_usd?: number | null;
+          error?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          household_id?: string | null;
+          user_id?: string | null;
+          lesson_id?: string | null;
+          provider?: string;
+          operation?: string;
+          model?: string | null;
+          surface?: string;
+          status?: string;
+          audio_duration_ms?: number | null;
+          input_tokens?: number | null;
+          output_tokens?: number | null;
+          character_count?: number | null;
+          latency_ms?: number | null;
+          cost_micro_usd?: number | null;
+          error?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "provider_usage_events_household_id_fkey";
+            columns: ["household_id"];
+            isOneToOne: false;
+            referencedRelation: "households";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "provider_usage_events_lesson_id_fkey";
+            columns: ["lesson_id"];
+            isOneToOne: false;
+            referencedRelation: "lessons";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       chat_corrections: {
         Row: {
           id: string;
@@ -1689,7 +1767,41 @@ export type Database = {
       };
     };
     Views: {
-      [_ in never]: never;
+      provider_usage_monthly: {
+        Row: {
+          month: string;
+          provider: string;
+          operation: string;
+          model: string | null;
+          succeeded_count: number;
+          failed_count: number;
+          audio_duration_ms_sum: number;
+          input_tokens_sum: number;
+          output_tokens_sum: number;
+          character_count_sum: number;
+          cost_micro_usd_sum: number;
+          cost_usd_sum: number;
+        };
+        Relationships: [];
+      };
+      lesson_processing_latency: {
+        Row: {
+          job_id: string;
+          lesson_id: string;
+          household_id: string;
+          status: Database["public"]["Enums"]["lesson_processing_status"];
+          attempt_count: number;
+          queued_at: string;
+          started_at: string | null;
+          finished_at: string | null;
+          failed_at: string | null;
+          error_summary: string | null;
+          latency_ms: number | null;
+          worker_latency_ms: number | null;
+          failure_latency_ms: number | null;
+        };
+        Relationships: [];
+      };
     };
     Functions: {
       current_household_id: {

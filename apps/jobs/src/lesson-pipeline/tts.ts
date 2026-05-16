@@ -21,12 +21,14 @@
 import {
   GOOGLE_TTS_PROVIDER_ID,
   TTS_CACHE_BUCKET,
+  estimateCostMicroUsd,
   ttsCacheKey,
   ttsCacheStoragePath,
   type SynthesizeInput,
   type TtsCacheKey,
 } from "@reverb/ai";
 import type { TablesInsert } from "@reverb/db/types";
+import type { ProviderUsageRecorder } from "@reverb/db/usage";
 import type { PipelineLogger } from "./logger.js";
 import type { ServiceClient } from "./state.js";
 
@@ -36,6 +38,10 @@ export type GenerateVocabAudioInput = {
   supabase: ServiceClient;
   synthesize: SynthesizeFn;
   logger: PipelineLogger;
+  // VOL-138: every actual Google TTS synthesis writes a provider_usage_events
+  // row. Cache hits don't consume the paid API so they're skipped — the cost
+  // dashboard reflects spend, not lookups.
+  recordUsage: ProviderUsageRecorder;
   lessonId: string;
   householdId: string;
   voiceName?: string;
@@ -150,14 +156,66 @@ async function ensureVocabTtsAsset(args: EnsureInput): Promise<EnsureOutcome> {
   }
 
   const storagePath = ttsCacheStoragePath({ householdId: args.householdId, key });
-  const audio = await args.synthesize({
-    text: key.text,
-    languageCode: key.languageCode,
-    voiceName: key.voiceName,
-  });
+  const synthesizeStartedAt = Date.now();
+  let audio: Buffer;
+  try {
+    audio = await args.synthesize({
+      text: key.text,
+      languageCode: key.languageCode,
+      voiceName: key.voiceName,
+    });
+  } catch (err) {
+    await args.recordUsage({
+      provider: GOOGLE_TTS_PROVIDER_ID,
+      operation: "tts",
+      surface: "lesson-pipeline.generating_audio.vocab_tts",
+      householdId: args.householdId,
+      lessonId: args.lessonId,
+      model: key.voiceName,
+      status: "failed",
+      characterCount: key.text.length,
+      latencyMs: Date.now() - synthesizeStartedAt,
+      error: describe(err),
+      metadata: { vocab_item_id: args.vocab.id, language_code: key.languageCode },
+    });
+    throw err;
+  }
   if (!audio || audio.length === 0) {
+    await args.recordUsage({
+      provider: GOOGLE_TTS_PROVIDER_ID,
+      operation: "tts",
+      surface: "lesson-pipeline.generating_audio.vocab_tts",
+      householdId: args.householdId,
+      lessonId: args.lessonId,
+      model: key.voiceName,
+      status: "failed",
+      characterCount: key.text.length,
+      latencyMs: Date.now() - synthesizeStartedAt,
+      error: "Synthesizer returned empty audio buffer",
+      metadata: { vocab_item_id: args.vocab.id, language_code: key.languageCode },
+    });
     throw new Error("Synthesizer returned empty audio buffer");
   }
+  await args.recordUsage({
+    provider: GOOGLE_TTS_PROVIDER_ID,
+    operation: "tts",
+    surface: "lesson-pipeline.generating_audio.vocab_tts",
+    householdId: args.householdId,
+    lessonId: args.lessonId,
+    model: key.voiceName,
+    characterCount: key.text.length,
+    latencyMs: Date.now() - synthesizeStartedAt,
+    costMicroUsd: estimateCostMicroUsd({
+      provider: "google-tts",
+      voiceName: key.voiceName,
+      characterCount: key.text.length,
+    }),
+    metadata: {
+      vocab_item_id: args.vocab.id,
+      language_code: key.languageCode,
+      byte_size: audio.length,
+    },
+  });
 
   await uploadTtsObject(args.supabase, storagePath, audio);
   const inserted = await insertCacheRow(args.supabase, {

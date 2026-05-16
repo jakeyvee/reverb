@@ -1,5 +1,5 @@
 import type { DiarizationInput, DiarizationOutput } from "@reverb/domain";
-import { anthropicCompletion } from "./anthropic.js";
+import { anthropicCompletion, type AnthropicUsage } from "./anthropic.js";
 import {
   DIARIZATION_DEFAULT_MODEL,
   DIARIZATION_PROMPT_VERSION,
@@ -24,6 +24,8 @@ export type InferDiarizationResult = {
   model: string;
   /** Prompt version stamped on the run; persisted for future reprocessing. */
   promptVersion: string;
+  /** Token counts reported by Anthropic, persisted on provider_usage_events. */
+  usage: AnthropicUsage;
 };
 
 // Per-segment cap: ~150 tokens of JSON per segment is generous (id, label,
@@ -41,7 +43,7 @@ export async function inferDiarizationWithAnthropic(
 ): Promise<InferDiarizationResult> {
   const model = input.model ?? DIARIZATION_DEFAULT_MODEL;
   const userPrompt = buildDiarizationUserPrompt(input);
-  const rawResponse = await anthropicCompletion({
+  const { text: rawResponse, usage } = await anthropicCompletion({
     model,
     system: DIARIZATION_SYSTEM_PROMPT,
     user: userPrompt,
@@ -58,5 +60,6 @@ export async function inferDiarizationWithAnthropic(
     rawResponse,
     model,
     promptVersion: DIARIZATION_PROMPT_VERSION,
+    usage,
   };
 }
