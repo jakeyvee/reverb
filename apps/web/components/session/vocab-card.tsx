@@ -27,6 +27,15 @@ type Props = {
   // screen. Separate from `onAnswered` so the queue advances on explicit
   // user input rather than the instant a review lands.
   onAdvance: () => void;
+  // Fires when the user marks the card "known" via the override controls.
+  // The runner mirrors that into its local answeredHere set so the queue
+  // advances past the item and `completeSession` accepts the finish call.
+  onSkipped?: (snapshot: {
+    sessionItemId: string;
+    sessionXpEarned: number;
+    cardsReviewed: number;
+    exercisesAttempted: number;
+  }) => void;
 };
 
 type RatingConfig = {
@@ -72,6 +81,7 @@ export function SessionVocabCard({
   positionLabel,
   onAnswered,
   onAdvance,
+  onSkipped,
 }: Props) {
   const [phase, setPhase] = useState<ReviewKeyPhase>("prompt");
   const [feedback, setFeedback] = useState<SubmitVocabReviewActionResult | null>(null);
@@ -240,7 +250,21 @@ export function SessionVocabCard({
       ) : null}
 
       <div className="border-t border-border pt-3">
-        <VocabOverrideControls vocabItemId={card.vocabItemId} onKnown={onAdvance} />
+        <VocabOverrideControls
+          vocabItemId={card.vocabItemId}
+          sessionItemId={sessionItemId}
+          onKnown={(result) => {
+            if (sessionItemId && result.session) {
+              onSkipped?.({
+                sessionItemId,
+                sessionXpEarned: result.session.sessionXpEarned,
+                cardsReviewed: result.session.cardsReviewed,
+                exercisesAttempted: result.session.exercisesAttempted,
+              });
+            }
+            onAdvance();
+          }}
+        />
       </div>
     </Card>
   );

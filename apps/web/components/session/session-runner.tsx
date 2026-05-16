@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState, useTransition } from "react";
+import { useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { completeSessionAction, type CompleteSessionActionResult } from "@/lib/session/actions";
@@ -42,6 +42,13 @@ export function SessionRunner({ view }: Props) {
     exercisesAttempted: view.exercisesAttempted,
     answeredHere: new Set(),
   }));
+  // Ref mirror of `state.answeredHere` so the `advance` callback can see
+  // an id that was just added by a setState updater in the same batch.
+  // Without this, `onSkipped` → `onAdvance` fires both queue updates in
+  // one event tick, and React calls advance's setActiveIndex updater
+  // before the answeredHere closure has propagated — the runner would
+  // wrap and re-select the just-skipped item.
+  const answeredHereRef = useRef<Set<string>>(state.answeredHere);
   const [activeIndex, setActiveIndex] = useState(() => firstUnansweredIndex(items));
   const [completion, setCompletion] = useState<CompleteSessionActionResult | null>(null);
   const [pendingComplete, startCompleteTransition] = useTransition();
@@ -72,6 +79,10 @@ export function SessionRunner({ view }: Props) {
         if (prev.answeredHere.has(sessionItemId)) return prev;
         const next = new Set(prev.answeredHere);
         next.add(sessionItemId);
+        // Mirror into the ref inside the updater so `advance` (which may
+        // run in the same React batch) sees the new id even before the
+        // committed state propagates through closures.
+        answeredHereRef.current = next;
         return {
           xpEarned: snapshot?.sessionXpEarned ?? prev.xpEarned,
           cardsReviewed: snapshot?.cardsReviewed ?? prev.cardsReviewed,
@@ -87,12 +98,14 @@ export function SessionRunner({ view }: Props) {
     setActiveIndex((current) => {
       // Find the next item that hasn't been answered. We can't rely on
       // current+1 because the user may skip with the override controls
-      // ("I already know this"), which doesn't go through onAnswered.
+      // ("I already know this"), which doesn't go through the standard
+      // answer feedback flow. Reading the ref means we pick up an id that
+      // was just added by `onAnswered` in the same event tick.
       const completedIds = new Set<string>();
       for (const item of items) {
         if (item.completed) completedIds.add(item.sessionItemId);
       }
-      for (const id of state.answeredHere) completedIds.add(id);
+      for (const id of answeredHereRef.current) completedIds.add(id);
 
       for (let i = current + 1; i < items.length; i += 1) {
         if (!completedIds.has(items[i]!.sessionItemId)) return i;
@@ -105,7 +118,7 @@ export function SessionRunner({ view }: Props) {
       }
       return items.length; // sentinel: past the end → "all done"
     });
-  }, [items, state.answeredHere]);
+  }, [items]);
 
   const finish = useCallback(() => {
     if (pendingComplete) return;
@@ -226,6 +239,17 @@ function SessionItemView({
             onAnswered(item.sessionItemId);
           }
         }}
+        // "I already know this" routes through the server action so the
+        // session-item row is marked answered too; we mirror the resulting
+        // snapshot into the runner's local state so the queue advances
+        // immediately and the finish flow accepts the completion.
+        onSkipped={(snapshot) =>
+          onAnswered(snapshot.sessionItemId, {
+            sessionXpEarned: snapshot.sessionXpEarned,
+            cardsReviewed: snapshot.cardsReviewed,
+            exercisesAttempted: snapshot.exercisesAttempted,
+          })
+        }
         onAdvance={onAdvance}
       />
     );

@@ -569,6 +569,14 @@ export type RecordItemAnswerInput = {
   // exercises_attempted. The orchestrator is the single writer for these
   // counters so we keep the bookkeeping in one place.
   bucket: "card" | "exercise";
+  // Event kind to append to `practice_events`. Defaults to `item_answered`.
+  // The override path ("I already know this") sets this to `item_skipped`
+  // so the audit log distinguishes a graded answer from a user-driven
+  // bypass.
+  eventKind?: Database["public"]["Enums"]["practice_event_kind"];
+  // Optional context for the practice_events payload. Lets the override
+  // path tag the row with `source: "known"` for later analytics.
+  eventPayload?: Record<string, unknown>;
 };
 
 export type RecordItemAnswerResult = {
@@ -669,7 +677,7 @@ export async function recordSessionItemAnswer(
   await appendPracticeEvent(supabase, userId, {
     session_id: item.session_id,
     session_item_id: item.id,
-    kind: "item_answered",
+    kind: input.eventKind ?? "item_answered",
     occurred_at: now.toISOString(),
     payload: {
       correct: input.correct,
@@ -677,6 +685,7 @@ export async function recordSessionItemAnswer(
       response_ms: input.responseMs ?? null,
       xp_awarded: input.xpAwarded,
       bucket: input.bucket,
+      ...(input.eventPayload ?? {}),
     },
   });
 
