@@ -33,7 +33,16 @@ export const SHADOWING_CLIP_MIN_DURATION_MS = 1_000;
 export const SHADOWING_CLIP_MAX_DURATION_MS = 8_000;
 
 const SUPPORTED_AUDIO_BUCKETS = new Set(["lesson-clips"]);
-const AUDIO_SIGNED_URL_TTL_SECONDS = 60 * 10;
+// 90 minutes. The shadowing items are appended after the drill + vocab
+// segments of the queue, so by the time the user actually mounts a shadowing
+// card the URL may already be several minutes old. We sign once during
+// `hydrateSession` and never refresh, so the TTL has to cover the worst-case
+// "long session" path end-to-end — otherwise the `<audio>` element silently
+// fails (the user would be asked to shadow something they can't hear) and
+// there's no clear retry, since the recorder fallback assumes the clip
+// already played. 90 minutes leaves comfortable headroom over the longest
+// realistic daily-session length while keeping the credential short-lived.
+const AUDIO_SIGNED_URL_TTL_SECONDS = 60 * 90;
 
 const DEFAULT_LIMIT = 4;
 
