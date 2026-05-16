@@ -155,6 +155,13 @@ function buildServices(
       model: "test-extract-model",
       promptVersion: "extract-v1",
     }),
+    // The generating-audio tests use extractions with no grammar patterns,
+    // so this stub never gets called — but the field is required by the
+    // PipelineServices type for non-extracting tests that pull the same
+    // builder shape (none do today; this keeps the seam explicit).
+    generateGrammarExercises: async () => {
+      throw new Error("generateGrammarExercises should not be called in this fixture");
+    },
     synthesize: async (input) => {
       synthOpts.calls.push({ input });
       if (synthOpts.failTerms?.has(input.text)) {

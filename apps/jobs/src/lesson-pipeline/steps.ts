@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ANTHROPIC_DIARIZATION_PROVIDER_ID,
   ANTHROPIC_EXTRACTION_PROVIDER_ID,
@@ -15,15 +16,22 @@ import type {
   DiarizationOutput,
   DiarizationSegmentLabel,
   ExtractionOutput,
+  GrammarExerciseSpec,
   SpeakerLabel,
   Transcript,
 } from "@reverb/domain";
-import { normalizeLemma, normalizeReading, vocabDedupeKey } from "@reverb/domain";
+import {
+  GRAMMAR_EXERCISES_PER_PATTERN_MIN,
+  normalizeLemma,
+  normalizeReading,
+  validateGrammarExercises,
+  vocabDedupeKey,
+} from "@reverb/domain";
 import { LESSON_CLIPS_BUCKET, dialogueClipPath } from "@reverb/media";
 import type { JobRow, ServiceClient, SourceAudio } from "./state.js";
 import { isStageCompleted, markStageCompleted } from "./state.js";
 import type { PipelineLogger } from "./logger.js";
-import type { ResolvedPipelineServices } from "./services.js";
+import type { PipelineServices, ResolvedPipelineServices } from "./services.js";
 import { materializeDialogueClips } from "./clip-generation.js";
 import { WORKER_STAGES, type WorkerStage } from "./types.js";
 
@@ -455,9 +463,18 @@ type PreparedVocab = {
   row: TablesInsert<"vocab_items">;
 };
 
+type PreparedGrammarPattern = {
+  // Stable id minted client-side so the grammar_exercises rows can reference
+  // it without needing a `returning` round-trip after the parent insert.
+  id: string;
+  source: ExtractionOutput["grammar_patterns"][number];
+  sourceSegmentTexts: string[];
+  row: TablesInsert<"grammar_patterns">;
+};
+
 type ExtractionDerivedWrites = {
   vocab: PreparedVocab[];
-  grammar: Array<TablesInsert<"grammar_patterns">>;
+  grammar: PreparedGrammarPattern[];
   dialogue: Array<TablesInsert<"dialogue_clips">>;
   corrections: Array<TablesInsert<"teacher_corrections">>;
   runs: Array<TablesInsert<"extraction_runs">>;
@@ -483,7 +500,8 @@ function buildExtractionWrites(args: {
   );
   const grammar = uniqueBy(
     args.extraction.grammar_patterns.map((item) => buildGrammarRow(args, item, promptById)),
-    (row) => `${String(row.pattern).toLowerCase()}|${JSON.stringify(row.examples)}`,
+    (entry) =>
+      `${String(entry.row.pattern).toLowerCase()}|${JSON.stringify(entry.row.examples)}`,
   );
   const dialogue = uniqueBy(
     args.extraction.dialogue_clips.map((item) => buildDialogueRow(args, item, promptById)),
@@ -603,7 +621,11 @@ async function persistLessonOwnedRows(
   supabase: ServiceClient,
   writes: Pick<ExtractionDerivedWrites, "grammar" | "dialogue" | "corrections" | "runs">,
 ): Promise<void> {
-  await insertRows(supabase, "grammar_patterns", writes.grammar);
+  await insertRows(
+    supabase,
+    "grammar_patterns",
+    writes.grammar.map((entry) => entry.row),
+  );
   await insertRows(supabase, "dialogue_clips", writes.dialogue);
   // Upsert on the natural key so re-emitted corrections reuse the existing
   // row id — keeping each user's correction_drills FK intact. New
@@ -647,17 +669,135 @@ async function insertRows(
 ): Promise<void>;
 async function insertRows(
   supabase: ServiceClient,
-  table: "grammar_patterns" | "dialogue_clips" | "extraction_runs",
+  table: "grammar_exercises",
+  rows: Array<TablesInsert<"grammar_exercises">>,
+): Promise<void>;
+async function insertRows(
+  supabase: ServiceClient,
+  table: "grammar_patterns" | "dialogue_clips" | "extraction_runs" | "grammar_exercises",
   rows:
     | Array<TablesInsert<"grammar_patterns">>
     | Array<TablesInsert<"dialogue_clips">>
-    | Array<TablesInsert<"extraction_runs">>,
+    | Array<TablesInsert<"extraction_runs">>
+    | Array<TablesInsert<"grammar_exercises">>,
 ): Promise<void> {
   if (rows.length === 0) return;
   const { error } = await supabase.from(table).insert(rows as never);
   if (error) {
     throw new Error(`Could not persist ${table}: ${error.message}`);
   }
+}
+
+type GrammarExerciseGenerationSummary = {
+  patternsProcessed: number;
+  exercisesEmitted: number;
+  exercisesRejected: number;
+  patternsBelowMinimum: number;
+  patternsFailedToGenerate: number;
+};
+
+// Per-pattern exercise generation. Each pattern triggers one LLM call; the
+// emitted exercises are validated individually so a single bad item drops
+// out rather than failing the lesson. A whole-pattern failure (parse
+// error, network blip) is caught and counted so the pipeline still
+// completes the rest of the patterns.
+async function generateAndPersistGrammarExercises(args: {
+  supabase: ServiceClient;
+  lesson: LessonForExtraction;
+  patterns: PreparedGrammarPattern[];
+  generate: PipelineServices["generateGrammarExercises"];
+  language: string;
+  logger: PipelineLogger;
+}): Promise<GrammarExerciseGenerationSummary> {
+  const summary: GrammarExerciseGenerationSummary = {
+    patternsProcessed: 0,
+    exercisesEmitted: 0,
+    exercisesRejected: 0,
+    patternsBelowMinimum: 0,
+    patternsFailedToGenerate: 0,
+  };
+  const allRows: Array<TablesInsert<"grammar_exercises">> = [];
+
+  for (const pattern of args.patterns) {
+    summary.patternsProcessed += 1;
+    try {
+      const { output, model, promptVersion } = await args.generate({
+        patternId: pattern.id,
+        pattern: pattern.source.pattern,
+        explanation: pattern.source.explanation,
+        examples: pattern.source.examples,
+        sourceSentences: pattern.sourceSegmentTexts,
+        language: args.language,
+      });
+      const { valid, rejected } = validateGrammarExercises(output.exercises);
+      summary.exercisesRejected += rejected.length;
+      if (rejected.length > 0) {
+        args.logger.info("Grammar exercise generation rejected items", {
+          lessonId: args.lesson.id,
+          patternId: pattern.id,
+          rejectedCount: rejected.length,
+          reasons: rejected.slice(0, 5).map((r) => r.reason),
+        });
+      }
+      if (valid.length < GRAMMAR_EXERCISES_PER_PATTERN_MIN) {
+        summary.patternsBelowMinimum += 1;
+      }
+      for (const spec of valid) {
+        allRows.push(buildGrammarExerciseRow({
+          lesson: args.lesson,
+          pattern,
+          spec,
+          model,
+          promptVersion,
+        }));
+      }
+    } catch (err) {
+      summary.patternsFailedToGenerate += 1;
+      // Per the acceptance criterion: bad or ambiguous generation must not
+      // fail the lesson. Log and move on so the user still gets vocab +
+      // dialogue + corrections from this extraction.
+      args.logger.info("Grammar exercise generation failed", {
+        lessonId: args.lesson.id,
+        patternId: pattern.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  summary.exercisesEmitted = allRows.length;
+  await insertRows(args.supabase, "grammar_exercises", allRows);
+  return summary;
+}
+
+function buildGrammarExerciseRow(args: {
+  lesson: LessonForExtraction;
+  pattern: PreparedGrammarPattern;
+  spec: GrammarExerciseSpec;
+  model: string;
+  promptVersion: string;
+}): TablesInsert<"grammar_exercises"> {
+  const acceptedAnswers =
+    args.spec.kind === "multiple_choice" ? [] : (args.spec.acceptedAnswers ?? []);
+  const choices = args.spec.kind === "multiple_choice" ? args.spec.choices : [];
+  return {
+    household_id: args.lesson.household_id,
+    lesson_id: args.lesson.id,
+    grammar_pattern_id: args.pattern.id,
+    kind: args.spec.kind,
+    prompt: args.spec.prompt,
+    answer: args.spec.answer,
+    choices: choices as unknown as Json,
+    accepted_answers: acceptedAnswers as unknown as Json,
+    explanation: args.spec.explanation,
+    prompt_version: args.promptVersion,
+    metadata: {
+      model: args.model,
+      prompt_version: args.promptVersion,
+      pattern: args.pattern.source.pattern,
+      source_pattern_id: args.pattern.id,
+      source_lesson_id: args.lesson.id,
+    } as unknown as Json,
+  };
 }
 
 type ExistingVocabRow = {
@@ -916,26 +1056,36 @@ function buildGrammarRow(
   },
   item: ExtractionOutput["grammar_patterns"][number],
   promptById: Map<string, SegmentForExtraction>,
-): TablesInsert<"grammar_patterns"> {
+): PreparedGrammarPattern {
   const sourceSegments = resolveSourceSegments(
     item.sourceSegmentIds,
     promptById,
     `grammar pattern "${item.pattern}"`,
   );
+  // Mint the row id up-front so we can attribute generated exercises to
+  // this pattern in a second pass without round-tripping through the DB
+  // for a returning clause.
+  const id = randomUUID();
   return {
-    household_id: args.lesson.household_id,
-    lesson_id: args.lesson.id,
-    pattern: item.pattern,
-    description: item.explanation,
-    examples: item.examples,
-    difficulty: difficultyScore(item.difficulty),
-    metadata: extractionMetadata({
-      model: args.model,
-      promptVersion: args.promptVersion,
-      sourceTranscriptId: args.lesson.id,
-      sourceSegmentIds: sourceSegments.map((segment) => segment.id),
-      kind: "grammar",
-    }),
+    id,
+    source: item,
+    sourceSegmentTexts: sourceSegments.map((segment) => segment.text),
+    row: {
+      id,
+      household_id: args.lesson.household_id,
+      lesson_id: args.lesson.id,
+      pattern: item.pattern,
+      description: item.explanation,
+      examples: item.examples,
+      difficulty: difficultyScore(item.difficulty),
+      metadata: extractionMetadata({
+        model: args.model,
+        promptVersion: args.promptVersion,
+        sourceTranscriptId: args.lesson.id,
+        sourceSegmentIds: sourceSegments.map((segment) => segment.id),
+        kind: "grammar",
+      }),
+    },
   };
 }
 
@@ -1347,6 +1497,20 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
   await markPriorExtractionRunsSuperseded(supabase, job.lesson_id, extractedAt);
   await persistLessonOwnedRows(supabase, writes);
 
+  // Generate practice exercises for each detected grammar pattern. Runs
+  // after the patterns are persisted so the FK on grammar_exercises.
+  // grammar_pattern_id resolves; per-pattern failures are caught inside
+  // `generateAndPersistGrammarExercises` so the lesson still completes
+  // even when the generator can't produce anything for a given pattern.
+  const exerciseSummary = await generateAndPersistGrammarExercises({
+    supabase,
+    lesson,
+    patterns: writes.grammar,
+    generate: ctx.services.generateGrammarExercises,
+    language,
+    logger,
+  });
+
   const resolvedVocab = await reconcileVocab(supabase, lesson.household_id, writes.vocab);
   const newVocabCount = resolvedVocab.filter((entry) => entry.isNew).length;
 
@@ -1373,6 +1537,10 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
     newVocabCount,
     cardCount,
     grammarCount: writes.grammar.length,
+    grammarExerciseCount: exerciseSummary.exercisesEmitted,
+    grammarExerciseRejected: exerciseSummary.exercisesRejected,
+    grammarExerciseBelowMinimumPatterns: exerciseSummary.patternsBelowMinimum,
+    grammarExerciseFailedPatterns: exerciseSummary.patternsFailedToGenerate,
     dialogueCount: writes.dialogue.length,
     correctionCount: writes.corrections.length,
     runCount: EXTRACTION_RUN_KINDS.length,
@@ -1389,6 +1557,10 @@ async function extractingStep(ctx: StepContext): Promise<StepResult> {
       new_vocab_count: newVocabCount,
       card_count: cardCount,
       grammar_count: writes.grammar.length,
+      grammar_exercise_count: exerciseSummary.exercisesEmitted,
+      grammar_exercise_rejected: exerciseSummary.exercisesRejected,
+      grammar_exercise_patterns_below_minimum: exerciseSummary.patternsBelowMinimum,
+      grammar_exercise_patterns_failed: exerciseSummary.patternsFailedToGenerate,
       dialogue_count: writes.dialogue.length,
       correction_count: writes.corrections.length,
       run_version: runVersion,

@@ -4,12 +4,15 @@
 import {
   inferDiarizationWithAnthropic,
   inferExtractionWithAnthropic,
+  inferGrammarExercisesWithAnthropic,
   synthesizeSpeech,
   transcribeAudioWithGroq,
   type InferDiarizationInput,
   type InferDiarizationResult,
   type InferExtractionInput,
   type InferExtractionResult,
+  type InferGrammarExercisesInput,
+  type InferGrammarExercisesResult,
   type SynthesizeInput,
   type TranscribeAudioInput,
   type TranscribeAudioResult,
@@ -23,12 +26,19 @@ import type { ServiceClient } from "./state.js";
 export type Transcriber = (input: TranscribeAudioInput) => Promise<TranscribeAudioResult>;
 export type Diarizer = (input: InferDiarizationInput) => Promise<InferDiarizationResult>;
 export type Extractor = (input: InferExtractionInput) => Promise<InferExtractionResult>;
+export type GrammarExerciseGenerator = (
+  input: InferGrammarExercisesInput,
+) => Promise<InferGrammarExercisesResult>;
 export type Synthesizer = (input: SynthesizeInput) => Promise<Buffer>;
 
 export type PipelineServices = {
   transcribe: Transcriber;
   diarize: Diarizer;
   extract: Extractor;
+  // Generates a handful of practice exercises for a single grammar pattern.
+  // Called once per detected pattern after extraction; per-pattern failures
+  // and invalid exercises are filtered without failing the lesson.
+  generateGrammarExercises: GrammarExerciseGenerator;
   // Optional ffmpeg/ffprobe overrides for the clip-generation step. Production
   // leaves it unset (the helpers in @reverb/media auto-resolve the static
   // binary); tests inject a fake runner so the orchestrator can be exercised
@@ -94,6 +104,7 @@ export function defaultPipelineServices(supabase: ServiceClient): PipelineServic
     transcribe: transcribeAudioWithGroq,
     diarize: inferDiarizationWithAnthropic,
     extract: inferExtractionWithAnthropic,
+    generateGrammarExercises: inferGrammarExercisesWithAnthropic,
     synthesize: synthesizeSpeech,
     emailer: defaultLessonEmailer(),
     resolveRecipientEmail: createAuthAdminRecipientResolver(supabase),

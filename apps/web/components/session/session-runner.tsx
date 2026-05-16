@@ -7,6 +7,7 @@ import { completeSessionAction, type CompleteSessionActionResult } from "@/lib/s
 import type { DailySessionView, SessionItem } from "@/lib/session/orchestrator";
 import { SessionVocabCard } from "@/components/session/vocab-card";
 import { SessionDrillCard } from "@/components/session/drill-card";
+import { SessionGrammarCard } from "@/components/session/grammar-exercise-card";
 import { SessionShadowingCard } from "@/components/session/shadowing-card";
 import { SessionListeningCard } from "@/components/session/listening-card";
 
@@ -252,6 +253,28 @@ function SessionItemView({
             exercisesAttempted: snapshot.exercisesAttempted,
           })
         }
+        onAdvance={onAdvance}
+      />
+    );
+  }
+  if (item.kind === "grammar_exercise") {
+    return (
+      <SessionGrammarCard
+        key={item.sessionItemId}
+        exercise={item.exercise}
+        sessionItemId={item.sessionItemId}
+        positionLabel={positionLabel}
+        onAnswered={(result) => {
+          if (result.ok && result.session) {
+            onAnswered(item.sessionItemId, {
+              sessionXpEarned: result.session.sessionXpEarned,
+              cardsReviewed: result.session.cardsReviewed,
+              exercisesAttempted: result.session.exercisesAttempted,
+            });
+          } else if (result.ok) {
+            onAnswered(item.sessionItemId);
+          }
+        }}
         onAdvance={onAdvance}
       />
     );

@@ -5,6 +5,11 @@ import { loadDueVocabReviewCards, type ReviewableVocabCard } from "./vocab-revie
 import type { CorrectionDrillView } from "./correction-drills";
 import { ensureCorrectionDrillsForUser } from "./correction-drills";
 import {
+  loadGrammarExercisesByIds,
+  loadNextGrammarExercise,
+  type SessionGrammarExercise,
+} from "./grammar-exercises";
+import {
   loadShadowingCandidates,
   loadShadowingClipsByIds,
   type ShadowingClipView,
@@ -54,9 +59,13 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 }
 
 // Pure assembly of the queue order. Pulled out so the rule (mistake drills
-// always slot ahead of vocab; listening + shadowing trail at the end;
-// ordering inside each kind is preserved from the loader) lives in one
-// testable place.
+// always slot ahead of grammar, grammar before vocab, listening items trail
+// near the end, shadowing at the very end; ordering inside each kind is
+// preserved from the loader) lives in one testable place.
+//
+// VOL-129 added the grammar slot. We aim for one grammar exercise per
+// session, inserted between mistake drills and vocab reviews so it never
+// blocks the user's most important correction practice.
 //
 // Both listening and shadowing reuse the `dialogue_clip` row kind. They are
 // distinguished by the presence of `metadata.listening`: listening items
@@ -68,12 +77,14 @@ export function xpForVocabRating(rating: keyof typeof VOCAB_XP_BY_RATING): numbe
 // the end of the queue.
 export type AssembledItem =
   | { kind: "mistake_drill"; correctionDrillId: string }
+  | { kind: "grammar_exercise"; grammarExerciseId: string }
   | { kind: "card"; cardId: string }
   | { kind: "listening_comprehension"; clipId: string; prompt: ListeningPrompt }
   | { kind: "shadowing"; dialogueClipId: string };
 
 export function assembleSessionQueue(args: {
   corrections: ReadonlyArray<{ drillId: string }>;
+  grammarExercises?: ReadonlyArray<{ exerciseId: string }>;
   vocabCards: ReadonlyArray<{ cardId: string }>;
   listening?: ReadonlyArray<{ clipId: string; prompt: ListeningPrompt }>;
   shadowingClips?: ReadonlyArray<{ clipId: string }>;
@@ -82,6 +93,10 @@ export function assembleSessionQueue(args: {
     ...args.corrections.map<AssembledItem>((drill) => ({
       kind: "mistake_drill",
       correctionDrillId: drill.drillId,
+    })),
+    ...(args.grammarExercises ?? []).map<AssembledItem>((exercise) => ({
+      kind: "grammar_exercise",
+      grammarExerciseId: exercise.exerciseId,
     })),
     ...args.vocabCards.map<AssembledItem>((card) => ({
       kind: "card",
@@ -110,6 +125,15 @@ export type SessionItem =
       kind: "mistake_drill";
       completed: boolean;
       drill: CorrectionDrillView;
+    }
+  | {
+      sessionItemId: string;
+      position: number;
+      kind: "grammar_exercise";
+      completed: boolean;
+      // The grader runs client-side against this hydrated copy and the
+      // server action re-validates by re-loading from the DB on submit.
+      exercise: SessionGrammarExercise;
     }
   | {
       sessionItemId: string;
@@ -187,7 +211,8 @@ export async function startOrResumeTodaysSession(
     // queue stay in place.
     if (hydrated.items.length === 0 && hydrated.unresolvedItems === 0) {
       await ensureCorrectionDrillsForUser(supabase, userId);
-      const { drills, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
+      const { drills, grammarExercise, vocabCards, listening, shadowingClips } =
+        await loadCandidateQueue(
         supabase,
         userId,
         {
@@ -200,6 +225,7 @@ export async function startOrResumeTodaysSession(
       );
       const assembled = assembleSessionQueue({
         corrections: drills.map((d) => ({ drillId: d.drillId })),
+        grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
         vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
         listening,
         shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
@@ -223,7 +249,7 @@ export async function startOrResumeTodaysSession(
   // behaviour so the orchestrator is a drop-in replacement.
   await ensureCorrectionDrillsForUser(supabase, userId);
 
-  const { drills, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
+  const { drills, grammarExercise, vocabCards, listening, shadowingClips } = await loadCandidateQueue(
     supabase,
     userId,
     {
@@ -237,6 +263,7 @@ export async function startOrResumeTodaysSession(
 
   const assembled = assembleSessionQueue({
     corrections: drills.map((d) => ({ drillId: d.drillId })),
+    grammarExercises: grammarExercise ? [{ exerciseId: grammarExercise.exerciseId }] : [],
     vocabCards: vocabCards.map((c) => ({ cardId: c.cardId })),
     listening,
     shadowingClips: shadowingClips.map((s) => ({ clipId: s.clipId })),
@@ -279,6 +306,7 @@ export async function startOrResumeTodaysSession(
       source: "daily_orchestrator",
       kinds: {
         mistake_drill: assembled.filter((item) => item.kind === "mistake_drill").length,
+        grammar_exercise: assembled.filter((item) => item.kind === "grammar_exercise").length,
         card: assembled.filter((item) => item.kind === "card").length,
         listening_comprehension: assembled.filter((item) => item.kind === "listening_comprehension")
           .length,
@@ -334,12 +362,13 @@ async function loadCandidateQueue(
   },
 ): Promise<{
   drills: CorrectionDrillView[];
+  grammarExercise: SessionGrammarExercise | null;
   vocabCards: ReviewableVocabCard[];
   listening: Array<{ clipId: string; prompt: ListeningPrompt }>;
   shadowingClips: ShadowingClipView[];
 }> {
   const nowIso = args.now.toISOString();
-  const [drillResp, vocab, listeningCandidates, shadowing] = await Promise.all([
+  const [drillResp, vocab, grammarExercise, listeningCandidates, shadowing] = await Promise.all([
     supabase
       .from("correction_drills")
       .select(
@@ -351,6 +380,10 @@ async function loadCandidateQueue(
       .order("due_at", { ascending: true })
       .limit(args.drillLimit * 2),
     loadDueVocabReviewCards(supabase, userId, { now: args.now, limit: args.vocabLimit }),
+    // One grammar exercise per session — `loadNextGrammarExercise` returns
+    // the most recent unseen one (or null if the user has no eligible
+    // exercises, in which case we just skip the slot).
+    loadNextGrammarExercise(supabase, userId),
     loadListeningClipCandidates(supabase, { limit: Math.max(args.listeningLimit * 3, 6) }),
     loadShadowingCandidates(supabase, userId, { limit: args.shadowingLimit }),
   ]);
@@ -397,7 +430,7 @@ async function loadCandidateQueue(
       confidenceTier: tier,
     });
   }
-  return { drills, vocabCards: vocab, listening, shadowingClips: shadowing };
+  return { drills, grammarExercise, vocabCards: vocab, listening, shadowingClips: shadowing };
 }
 
 // Maps an assembled item into the practice_session_items insert row. The
@@ -420,6 +453,14 @@ function buildSessionItemInsert(
         position,
         kind: "mistake_drill",
         correction_drill_id: item.correctionDrillId,
+      };
+    case "grammar_exercise":
+      return {
+        session_id: sessionId,
+        user_id: userId,
+        position,
+        kind: "grammar_exercise",
+        grammar_exercise_id: item.grammarExerciseId,
       };
     case "card":
       return {
@@ -461,7 +502,7 @@ async function hydrateSession(
   const { data: itemRows, error: itemsError } = await supabase
     .from("practice_session_items")
     .select(
-      "id, position, kind, card_id, correction_drill_id, dialogue_clip_id, answered_at, rating, correct, response_ms, metadata",
+      "id, position, kind, card_id, correction_drill_id, grammar_exercise_id, dialogue_clip_id, answered_at, rating, correct, response_ms, metadata",
     )
     .eq("session_id", session.id)
     .order("position", { ascending: true });
@@ -471,12 +512,18 @@ async function hydrateSession(
   const rows = itemRows ?? [];
   const drillIds: string[] = [];
   const cardIds: string[] = [];
+  const grammarExerciseIds: string[] = [];
   // Dialogue-clip rows split between shadowing and listening based on
   // whether `metadata.listening` is populated. Two id buckets so each
   // loader only signs URLs for the clips it actually needs.
   const listeningClipIds: string[] = [];
   const shadowingClipIds: string[] = [];
-  type RowKind = "mistake_drill" | "card" | "listening_comprehension" | "shadowing";
+  type RowKind =
+    | "mistake_drill"
+    | "card"
+    | "grammar_exercise"
+    | "listening_comprehension"
+    | "shadowing";
   const rowKinds = new Map<string, RowKind>();
   for (const row of rows) {
     if (row.kind === "mistake_drill" && row.correction_drill_id) {
@@ -485,6 +532,9 @@ async function hydrateSession(
     } else if (row.kind === "card" && row.card_id) {
       cardIds.push(row.card_id);
       rowKinds.set(row.id, "card");
+    } else if (row.kind === "grammar_exercise" && row.grammar_exercise_id) {
+      grammarExerciseIds.push(row.grammar_exercise_id);
+      rowKinds.set(row.id, "grammar_exercise");
     } else if (row.kind === "dialogue_clip" && row.dialogue_clip_id) {
       // Listening rows always carry `metadata.listening`; shadowing rows
       // were inserted with metadata=null. A row that has neither (old data,
@@ -501,9 +551,12 @@ async function hydrateSession(
     }
   }
 
-  const [drillsById, cardsById, listeningById, shadowingById] = await Promise.all([
+  const [drillsById, cardsById, grammarById, listeningById, shadowingById] = await Promise.all([
     drillIds.length > 0 ? loadDrillsByIds(supabase, userId, drillIds) : new Map(),
     cardIds.length > 0 ? loadCardsByIds(supabase, userId, cardIds) : new Map(),
+    grammarExerciseIds.length > 0
+      ? loadGrammarExercisesByIds(supabase, grammarExerciseIds)
+      : new Map<string, SessionGrammarExercise>(),
     listeningClipIds.length > 0
       ? loadListeningClipsByIds(supabase, listeningClipIds)
       : new Map<string, ListeningClipHydration>(),
@@ -539,6 +592,21 @@ async function hydrateSession(
         kind: "card",
         completed: row.answered_at !== null,
         card,
+      });
+    } else if (resolvedKind === "grammar_exercise") {
+      const exercise = row.grammar_exercise_id
+        ? grammarById.get(row.grammar_exercise_id)
+        : undefined;
+      if (!exercise) {
+        unresolved += 1;
+        continue;
+      }
+      items.push({
+        sessionItemId: row.id,
+        position: row.position,
+        kind: "grammar_exercise",
+        completed: row.answered_at !== null,
+        exercise,
       });
     } else if (resolvedKind === "listening_comprehension") {
       const hydration = row.dialogue_clip_id ? listeningById.get(row.dialogue_clip_id) : undefined;
@@ -581,8 +649,9 @@ async function hydrateSession(
         clip,
       });
     } else {
-      // Unknown kind (grammar_exercise placeholder, or a dialogue_clip row
-      // that lacked an FK). Drop rather than failing the whole page.
+      // Unknown kind (a dialogue_clip row that lacked an FK, or a future
+      // kind we haven't taught the runner about). Drop rather than failing
+      // the whole page.
       unresolved += 1;
     }
   }

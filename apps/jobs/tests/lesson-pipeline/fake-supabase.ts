@@ -18,6 +18,7 @@ type SegmentRow = Tables<"transcript_segments">;
 type WordRow = Tables<"transcript_words">;
 type VocabRow = Tables<"vocab_items">;
 type GrammarPatternRow = Tables<"grammar_patterns">;
+type GrammarExerciseRow = Tables<"grammar_exercises">;
 type DialogueClipRow = Tables<"dialogue_clips">;
 type TeacherCorrectionRow = Tables<"teacher_corrections">;
 type ExtractionRunRow = Tables<"extraction_runs">;
@@ -37,6 +38,7 @@ type TableName =
   | "transcript_words"
   | "vocab_items"
   | "grammar_patterns"
+  | "grammar_exercises"
   | "dialogue_clips"
   | "teacher_corrections"
   | "extraction_runs"
@@ -54,6 +56,7 @@ export class FakeSupabase {
   transcriptWords: WordRow[] = [];
   vocabItems: VocabRow[] = [];
   grammarPatterns: GrammarPatternRow[] = [];
+  grammarExercises: GrammarExerciseRow[] = [];
   dialogueClips: DialogueClipRow[] = [];
   teacherCorrections: TeacherCorrectionRow[] = [];
   extractionRuns: ExtractionRunRow[] = [];
@@ -103,6 +106,8 @@ export class FakeSupabase {
         return new RowsQuery(this, table, this.vocabItems);
       case "grammar_patterns":
         return new RowsQuery(this, table, this.grammarPatterns);
+      case "grammar_exercises":
+        return new RowsQuery(this, table, this.grammarExercises);
       case "dialogue_clips":
         return new RowsQuery(this, table, this.dialogueClips);
       case "teacher_corrections":
@@ -249,6 +254,21 @@ export class FakeSupabase {
         ...row,
       };
     }
+    if (table === "grammar_exercises") {
+      return {
+        id: row.id ?? randomUUID(),
+        lesson_id: null,
+        grammar_pattern_id: null,
+        choices: [],
+        accepted_answers: [],
+        explanation: null,
+        prompt_version: null,
+        metadata: {},
+        created_at: now,
+        updated_at: now,
+        ...row,
+      };
+    }
     if (table === "dialogue_clips") {
       return {
         id: row.id ?? randomUUID(),
@@ -350,6 +370,17 @@ export class FakeSupabase {
       const removedIds = new Set(removed.map((row) => row.id));
       this.cards = this.cards.filter((card) => !removedIds.has(card.vocab_item_id));
       this.knownWords = this.knownWords.filter((entry) => !removedIds.has(entry.vocab_item_id));
+      return;
+    }
+    if (table === "grammar_patterns") {
+      // Mirror `on delete cascade` from grammar_exercises.grammar_pattern_id
+      // so a clearLessonOwnedExtractionRows on retry also empties the
+      // dependent exercises rather than leaving orphans pointing at deleted
+      // pattern ids.
+      const removedIds = new Set(removed.map((row) => row.id));
+      this.grammarExercises = this.grammarExercises.filter(
+        (ex) => !removedIds.has(ex.grammar_pattern_id),
+      );
     }
   }
 }

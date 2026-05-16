@@ -9,6 +9,12 @@ import {
   nextDrillSchedule,
   type CorrectionDrillResult,
 } from "@reverb/domain/schemas/correction-drill";
+import {
+  GRAMMAR_EXERCISE_XP_PER_CORRECT,
+  GRAMMAR_EXERCISE_KINDS,
+  gradeGrammarExercise,
+  type GrammarExerciseKind,
+} from "@reverb/domain/schemas/grammar-exercise";
 import { requireUser } from "@/lib/auth/get-user";
 import { getProfile } from "@/lib/auth/get-profile";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
@@ -20,13 +26,13 @@ import {
   type CompleteSessionResult,
   type DailySessionView,
 } from "@/lib/session/orchestrator";
-import { SHADOWING_XP_PER_PASS } from "@/lib/session/shadowing";
 import {
   LISTENING_PROMPT_KINDS,
   gradeListeningTranscription,
   parseListeningPromptFromMetadata,
   type ListeningPromptKind,
 } from "@/lib/session/listening-comprehension";
+import { SHADOWING_XP_PER_PASS } from "@/lib/session/shadowing";
 
 export type RecordDrillAttemptInput = {
   drillId: string;
@@ -241,7 +247,158 @@ export async function startTodaysSessionAction(): Promise<StartTodaysSessionResu
   }
 }
 
-// ---- Shadowing ----------------------------------------------------------
+export type RecordGrammarExerciseInput = {
+  exerciseId: string;
+  userResponse: string;
+  responseMs?: number;
+  // Optional session-item link. When provided, the answer also updates the
+  // practice_session_items row + the session counters + the
+  // practice_events log. Standalone "extra practice" usage would omit this.
+  sessionItemId?: string;
+};
+
+export type RecordGrammarExerciseResult =
+  | {
+      ok: true;
+      correct: boolean;
+      // The canonical answer, returned so the UI can show what the user
+      // should have typed when they got it wrong.
+      expectedAnswer: string;
+      explanation: string | null;
+      xpAwarded: number;
+      session?: {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      };
+    }
+  | { ok: false; error: string };
+
+// Records a single grammar exercise attempt:
+//   1. Loads the exercise (RLS scopes to household).
+//   2. Grades it against the stored answer + accepted variants.
+//   3. Updates the practice_session_items row when a session-item id was
+//      passed (idempotent; the orchestrator's helper handles re-submits).
+//
+// "First-try correctness" is captured by `practice_session_items.correct` —
+// the orchestrator inserts one row per exercise per session, and the row's
+// initial correct value is the user's first answer. A future mastery
+// dashboard reads (kind='grammar_exercise', correct=true, ordered by
+// created_at) to build per-pattern recall metrics.
+export async function recordGrammarExerciseAttempt(
+  input: RecordGrammarExerciseInput,
+): Promise<RecordGrammarExerciseResult> {
+  const user = await requireUser();
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) {
+    return { ok: false, error: "Supabase is not configured for this environment." };
+  }
+
+  const { data: exercise, error: exerciseError } = await supabase
+    .from("grammar_exercises")
+    .select("id, kind, answer, choices, accepted_answers, explanation")
+    .eq("id", input.exerciseId)
+    .maybeSingle();
+  if (exerciseError) {
+    return { ok: false, error: exerciseError.message };
+  }
+  if (!exercise) {
+    return { ok: false, error: "Grammar exercise not found." };
+  }
+  if (!isSupportedGrammarKind(exercise.kind)) {
+    return { ok: false, error: "Grammar exercise kind not supported by this client." };
+  }
+
+  const choices = parseStringArrayJson(exercise.choices);
+  const accepted = parseStringArrayJson(exercise.accepted_answers);
+
+  const typed = (input.userResponse ?? "").trim();
+  if (typed.length === 0) {
+    return { ok: false, error: "Please enter an answer before submitting." };
+  }
+
+  const grade = gradeGrammarExercise({
+    kind: exercise.kind,
+    answer: exercise.answer,
+    acceptedAnswers: accepted,
+    choices: exercise.kind === "multiple_choice" ? choices : undefined,
+    userResponse: typed,
+  });
+
+  const xpAwarded = grade.correct ? GRAMMAR_EXERCISE_XP_PER_CORRECT : 0;
+
+  let sessionSnapshot:
+    | {
+        sessionItemId: string;
+        sessionXpEarned: number;
+        cardsReviewed: number;
+        exercisesAttempted: number;
+      }
+    | undefined;
+  if (input.sessionItemId) {
+    try {
+      const recorded = await recordSessionItemAnswer(supabase, user.id, {
+        sessionItemId: input.sessionItemId,
+        correct: grade.correct,
+        rating: null,
+        responseMs: input.responseMs ?? null,
+        xpAwarded,
+        bucket: "exercise",
+        eventPayload: {
+          exercise_id: exercise.id,
+          grade_reason: grade.reason,
+          user_response: input.userResponse,
+        },
+      });
+      sessionSnapshot = {
+        sessionItemId: input.sessionItemId,
+        sessionXpEarned: recorded.sessionXpEarned,
+        cardsReviewed: recorded.cardsReviewed,
+        exercisesAttempted: recorded.exercisesAttempted,
+      };
+    } catch (sessionError) {
+      // Don't surface a session-bookkeeping failure as a graded miss — the
+      // grade is correct in its own right. Log so a follow-up can rebuild
+      // the counters offline if it matters.
+      console.warn(
+        "recordSessionItemAnswer failed for grammar exercise",
+        sessionError instanceof Error ? sessionError.message : sessionError,
+      );
+    }
+  }
+
+  return {
+    ok: true,
+    correct: grade.correct,
+    expectedAnswer: exercise.answer,
+    explanation: exercise.explanation,
+    xpAwarded,
+    session: sessionSnapshot,
+  };
+}
+
+function isSupportedGrammarKind(value: unknown): value is GrammarExerciseKind {
+  return (
+    typeof value === "string" &&
+    (GRAMMAR_EXERCISE_KINDS as ReadonlyArray<string>).includes(value)
+  );
+}
+
+function parseStringArrayJson(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string" && entry.trim().length > 0) out.push(entry);
+  }
+  return out;
+}
+
+// ---- Listening comprehension --------------------------------------------
+
+// XP awarded for a correct listening answer. Lower than vocab/correction
+// passes because the snippet is shorter and the question type rotates —
+// we want it to feel rewarding without crowding out the SRS-driven kinds.
 
 const ShadowingResultSchema = z.enum(["got_it", "try_again"]);
 export type ShadowingSelfMarkResult = z.infer<typeof ShadowingResultSchema>;
@@ -343,6 +500,7 @@ export async function recordShadowingAttempt(
 // passes because the snippet is shorter and the question type rotates —
 // we want it to feel rewarding without crowding out the SRS-driven kinds.
 // Kept module-private because "use server" forbids non-async exports.
+
 const LISTENING_XP_PER_CORRECT = 2;
 
 const ListeningAttemptInputSchema = z.object({

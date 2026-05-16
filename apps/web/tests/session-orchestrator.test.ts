@@ -19,26 +19,34 @@ const transcriptionPrompt: ListeningPrompt = {
 //   3. XP awards per vocab rating match the orchestrator's published map.
 
 describe("assembleSessionQueue", () => {
-  it("places mistake drills ahead of vocab cards", () => {
+  it("places mistake drills ahead of grammar and vocab cards", () => {
     const queue = assembleSessionQueue({
       corrections: [{ drillId: "drill-a" }],
+      grammarExercises: [{ exerciseId: "ex-1" }],
       vocabCards: [{ cardId: "card-1" }, { cardId: "card-2" }],
     });
-    expect(queue.map((entry) => entry.kind)).toEqual(["mistake_drill", "card", "card"]);
+    expect(queue.map((entry) => entry.kind)).toEqual([
+      "mistake_drill",
+      "grammar_exercise",
+      "card",
+      "card",
+    ]);
   });
 
-  it("returns vocab-only queue when there are no mistake drills", () => {
+  it("returns vocab-only queue when there are no mistake drills or grammar exercises", () => {
     const queue = assembleSessionQueue({
       corrections: [],
+      grammarExercises: [],
       vocabCards: [{ cardId: "card-1" }],
     });
     expect(queue).toHaveLength(1);
     expect(queue[0]).toEqual({ kind: "card", cardId: "card-1" });
   });
 
-  it("returns drills-only queue when there are no vocab cards", () => {
+  it("returns drills-only queue when there are no other items", () => {
     const queue = assembleSessionQueue({
       corrections: [{ drillId: "drill-a" }, { drillId: "drill-b" }],
+      grammarExercises: [],
       vocabCards: [],
     });
     expect(
@@ -46,17 +54,28 @@ describe("assembleSessionQueue", () => {
     ).toEqual(["drill-a", "drill-b"]);
   });
 
-  it("preserves caller ordering inside each kind", () => {
+  it("slots the grammar exercise between drills and vocab cards", () => {
     const queue = assembleSessionQueue({
       corrections: [{ drillId: "first" }, { drillId: "second" }],
+      grammarExercises: [{ exerciseId: "ex-1" }],
       vocabCards: [{ cardId: "vocab-first" }, { cardId: "vocab-second" }],
     });
     expect(queue).toEqual([
       { kind: "mistake_drill", correctionDrillId: "first" },
       { kind: "mistake_drill", correctionDrillId: "second" },
+      { kind: "grammar_exercise", grammarExerciseId: "ex-1" },
       { kind: "card", cardId: "vocab-first" },
       { kind: "card", cardId: "vocab-second" },
     ]);
+  });
+
+  it("omits the grammar slot when no exercise is available", () => {
+    const queue = assembleSessionQueue({
+      corrections: [{ drillId: "drill-a" }],
+      grammarExercises: [],
+      vocabCards: [{ cardId: "card-1" }],
+    });
+    expect(queue.map((entry) => entry.kind)).toEqual(["mistake_drill", "card"]);
   });
 
   it("appends shadowing items after drills and vocab", () => {
@@ -83,10 +102,17 @@ describe("assembleSessionQueue", () => {
   });
 
   it("returns an empty queue when no kind has items", () => {
-    expect(assembleSessionQueue({ corrections: [], vocabCards: [] })).toEqual([]);
-    expect(assembleSessionQueue({ corrections: [], vocabCards: [], shadowingClips: [] })).toEqual(
-      [],
-    );
+    expect(
+      assembleSessionQueue({ corrections: [], grammarExercises: [], vocabCards: [] }),
+    ).toEqual([]);
+    expect(
+      assembleSessionQueue({
+        corrections: [],
+        grammarExercises: [],
+        vocabCards: [],
+        shadowingClips: [],
+      }),
+    ).toEqual([]);
   });
 
   it("places listening comprehension items after vocab cards when supplied", () => {
