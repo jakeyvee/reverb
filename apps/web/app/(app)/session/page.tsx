@@ -7,7 +7,9 @@ import {
   loadDailySession,
 } from "@/lib/session/correction-drills";
 import { orderDailySession } from "@/lib/session/order";
+import { loadDueVocabReviewCards } from "@/lib/session/vocab-review";
 import { MistakeDrillRunner } from "@/components/session/mistake-drill-runner";
+import { VocabReviewRunner } from "@/components/session/vocab-review-runner";
 
 export const dynamic = "force-dynamic";
 
@@ -26,17 +28,25 @@ export default async function SessionPage() {
   }
 
   await ensureCorrectionDrillsForUser(supabase, user.id);
-  const session = await loadDailySession(supabase, user.id);
+  const [session, dueVocabCards] = await Promise.all([
+    loadDailySession(supabase, user.id),
+    loadDueVocabReviewCards(supabase, user.id),
+  ]);
   const queue = orderDailySession(session);
   const hasCorrections = session.corrections.length > 0;
   const correctionCount = session.corrections.length;
+  const dueVocabCount = dueVocabCards.length;
   const freshVocabCount = session.freshVocab.length;
 
   return (
     <PageShell>
       <div className="grid grid-cols-3 gap-2 text-center">
         <Stat label="Corrections" value={String(correctionCount)} highlight={hasCorrections} />
-        <Stat label="Fresh vocab" value={String(freshVocabCount)} />
+        <Stat
+          label="Vocab due"
+          value={String(dueVocabCount)}
+          highlight={!hasCorrections && dueVocabCount > 0}
+        />
         <Stat label="Retired" value={String(session.filtered.retired)} />
       </div>
 
@@ -50,22 +60,36 @@ export default async function SessionPage() {
 
       {hasCorrections ? (
         <MistakeDrillRunner drills={session.corrections} />
-      ) : (
+      ) : null}
+
+      {dueVocabCount > 0 ? (
+        <section className="space-y-2">
+          <SectionHeader
+            title={hasCorrections ? "Then · Vocab review" : "Vocab review"}
+            description={
+              hasCorrections
+                ? "Audio-first cards backed by FSRS — drills first, then vocab."
+                : "Audio-first cards backed by FSRS. Space plays audio, 1–4 rate."
+            }
+          />
+          <VocabReviewRunner cards={dueVocabCards} />
+        </section>
+      ) : !hasCorrections ? (
         <EmptyState
-          title="No correction drills due"
+          title="Nothing due right now"
           description={
-            queue.length > 0
-              ? "Fresh vocab is queued below once correction drills go live."
-              : "Upload a lesson — teacher corrections become drills automatically."
+            queue.length > 0 || freshVocabCount > 0
+              ? "You're caught up on reviews — check back later for the next batch."
+              : "Upload a lesson — vocab cards and correction drills appear here automatically."
           }
         />
-      )}
+      ) : null}
 
-      {freshVocabCount > 0 ? (
+      {freshVocabCount > 0 && dueVocabCount === 0 ? (
         <section className="space-y-2">
           <SectionHeader
             title="Coming up · Fresh vocab"
-            description="Surfaces after you clear today's correction drills."
+            description="New words queued from your latest lesson."
           />
           <ul className="space-y-2">
             {session.freshVocab.map((vocab) => (
