@@ -139,9 +139,13 @@ export default async function LessonDetailPage({ params }: Props) {
       <section>
         <SectionHeader
           title="Transcript"
-          description="Raw ASR output. Speaker labels appear once diarization runs."
+          description="Raw ASR output. Toggle translation or click any word to look it up."
         />
-        <TranscriptView segments={view.segments} status={status} />
+        <TranscriptView
+          segments={view.segments}
+          status={status}
+          targetLanguage={view.lesson.targetLanguage ?? view.lesson.sourceLanguage}
+        />
       </section>
     </div>
   );
