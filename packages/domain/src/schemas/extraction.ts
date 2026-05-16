@@ -85,6 +85,11 @@ export const TeacherCorrectionSchema = z.object({
   rationale: z.string().min(1).optional(),
   category: ExtractionCategorySchema,
   severity: CorrectionSeveritySchema.optional(),
+  // 0..1 self-reported confidence the LLM places on this correction. Optional
+  // so older runs (and any model that omits the field) still parse. The
+  // session selector treats values below CORRECTION_DRILL_MIN_CONFIDENCE as
+  // ineligible for scheduling and labels mid-band ones as uncertain.
+  confidence: z.number().min(0).max(1).optional(),
 });
 export type TeacherCorrection = z.infer<typeof TeacherCorrectionSchema>;
 

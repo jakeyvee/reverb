@@ -45,6 +45,9 @@ export const MistakeDrillItemSchema = z.object({
   correction: z.string().min(1),
   rationale: z.string().min(1).optional(),
   studentSpeaker: StudentSpeakerSchema,
+  // Carried from teacher_corrections.confidence. Optional because
+  // pre-VOL-120 corrections were never scored.
+  confidence: z.number().min(0).max(1).optional(),
 });
 export type MistakeDrillItem = z.infer<typeof MistakeDrillItemSchema>;
 
