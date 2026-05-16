@@ -1,7 +1,7 @@
 "use server";
 
 import { z } from "zod";
-import { ReviewRatingSchema, type ReviewRating } from "@reverb/domain";
+import { ReviewRatingSchema, type ReviewRating } from "@reverb/domain/schemas/review";
 import { requireUser } from "@/lib/auth/get-user";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import {
