@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Tables } from "@reverb/db/types";
 import { LESSON_AUDIO_BUCKET } from "@reverb/domain/schemas/upload";
-import { SCHEMA_VERSIONS, type Transcript } from "@reverb/domain";
+import { SCHEMA_VERSIONS, type ExtractionOutput, type Transcript } from "@reverb/domain";
 import { runLessonPipeline } from "../../src/lesson-pipeline/orchestrator.js";
 import type { ServiceClient } from "../../src/lesson-pipeline/state.js";
 import type { PipelineServices } from "../../src/lesson-pipeline/services.js";
@@ -47,6 +47,31 @@ function buildFile(): Tables<"lesson_files"> {
     metadata: {},
     created_at: new Date(0).toISOString(),
   };
+}
+
+function buildLesson(): Tables<"lessons"> {
+  const now = new Date(0).toISOString();
+  return {
+    id: LESSON_ID,
+    household_id: HOUSEHOLD_ID,
+    title: "Transcribing lesson",
+    description: null,
+    source_language: null,
+    target_language: null,
+    recorded_at: null,
+    status: "processing",
+    duration_ms: 60_000,
+    metadata: {},
+    created_by: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function seed(supabase: FakeSupabase): void {
+  supabase.insertJob(buildJob());
+  supabase.insertFile(buildFile());
+  supabase.insertLesson(buildLesson());
 }
 
 function asClient(supabase: FakeSupabase): ServiceClient {
@@ -110,6 +135,19 @@ function fixtureTranscript(): Transcript {
   };
 }
 
+function emptyExtraction(sourceTranscriptId: string): ExtractionOutput {
+  return {
+    schemaVersion: SCHEMA_VERSIONS.extractionOutput,
+    promptVersion: "stub",
+    language: "id",
+    sourceTranscriptId,
+    new_vocab: [],
+    grammar_patterns: [],
+    dialogue_clips: [],
+    teacher_corrections: [],
+  };
+}
+
 function fixtureServices(): PipelineServices {
   return {
     transcribe: async () => ({
@@ -139,14 +177,19 @@ function fixtureServices(): PipelineServices {
       model: "stub",
       promptVersion: "stub",
     }),
+    extract: async ({ sourceTranscriptId }) => ({
+      extraction: emptyExtraction(sourceTranscriptId),
+      rawResponse: "{}",
+      model: "stub",
+      promptVersion: "stub",
+    }),
   };
 }
 
 describe("transcribing stage", () => {
   it("persists segments and word timestamps from the adapter output", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seed(supabase);
 
     const result = await runLessonPipeline({
       supabase: asClient(supabase),
@@ -192,8 +235,7 @@ describe("transcribing stage", () => {
 
   it("records the raw provider payload on the job for audit", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seed(supabase);
 
     await runLessonPipeline({
       supabase: asClient(supabase),
@@ -218,12 +260,29 @@ describe("transcribing stage", () => {
 
   it("captures provider failures on the job row without losing the raw upload", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seed(supabase);
     const failingServices: PipelineServices = {
       transcribe: async () => {
         throw new Error("groq returned 503");
       },
+      diarize: async ({ sourceTranscriptId }) => ({
+        diarization: {
+          schemaVersion: SCHEMA_VERSIONS.diarization,
+          promptVersion: "stub",
+          model: "stub",
+          sourceTranscriptId,
+          segments: [],
+        },
+        rawResponse: "{}",
+        model: "stub",
+        promptVersion: "stub",
+      }),
+      extract: async ({ sourceTranscriptId }) => ({
+        extraction: emptyExtraction(sourceTranscriptId),
+        rawResponse: "{}",
+        model: "stub",
+        promptVersion: "stub",
+      }),
     };
 
     await expect(
@@ -249,8 +308,7 @@ describe("transcribing stage", () => {
 
   it("handles transcripts that ship segments but no word timestamps", async () => {
     const supabase = new FakeSupabase();
-    supabase.insertJob(buildJob());
-    supabase.insertFile(buildFile());
+    seed(supabase);
 
     const noWords: Transcript = {
       ...fixtureTranscript(),
