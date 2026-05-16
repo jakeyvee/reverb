@@ -34,6 +34,10 @@ export default defineConfig({
         find: "@reverb/media",
         replacement: path.resolve(here, "../../packages/media/src/index.ts"),
       },
+      {
+        find: "@reverb/email",
+        replacement: path.resolve(here, "../../packages/email/src/index.ts"),
+      },
     ],
   },
   test: {
