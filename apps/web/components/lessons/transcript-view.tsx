@@ -83,6 +83,10 @@ export function TranscriptView({ segments, status, targetLanguage }: Props) {
   const [selectedWord, setSelectedWord] = useState<SelectedWord | null>(null);
   const [glossLookup, setGlossLookup] = useState<GlossLookup | null>(null);
   const [bulkLoading, setBulkLoading] = useState(false);
+  // Monotonic id for in-flight gloss lookups. A rapid second click bumps this
+  // so the slower first response is discarded instead of overwriting the
+  // popover for the newly-selected word.
+  const glossRequestIdRef = useRef(0);
 
   // When the segments prop changes (e.g. revalidatePath fires after an
   // add-to-vocab), refresh the translation cache so persisted translations
@@ -92,12 +96,14 @@ export function TranscriptView({ segments, status, targetLanguage }: Props) {
   }, [initialTranslations]);
 
   const closePopover = useCallback(() => {
+    glossRequestIdRef.current += 1;
     setSelectedWord(null);
     setGlossLookup(null);
   }, []);
 
   const onWordClick = useCallback(
     (segmentId: string, word: string, anchor: DOMRect) => {
+      const requestId = ++glossRequestIdRef.current;
       setSelectedWord({
         segmentId,
         word,
@@ -108,6 +114,7 @@ export function TranscriptView({ segments, status, targetLanguage }: Props) {
       setGlossLookup({ kind: "loading" });
       glossTranscriptWord({ segmentId, word })
         .then((result) => {
+          if (glossRequestIdRef.current !== requestId) return;
           if (result.ok) {
             setGlossLookup({ kind: "ready", gloss: result.gloss });
           } else {
@@ -115,6 +122,7 @@ export function TranscriptView({ segments, status, targetLanguage }: Props) {
           }
         })
         .catch((err: unknown) => {
+          if (glossRequestIdRef.current !== requestId) return;
           setGlossLookup({
             kind: "error",
             message: err instanceof Error ? err.message : "Lookup failed.",
