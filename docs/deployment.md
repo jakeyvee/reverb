@@ -137,7 +137,7 @@ considered green when every box below is ticked.
 
 - [ ] Production project created; project ref recorded.
 - [ ] Migrations applied (`pnpm --filter @reverb/db db:push`). Confirm the
-      observability migration (`20260516120004_observability.sql`) created
+      observability migration (`20260516120010_observability.sql`) created
       `provider_usage_events`, `provider_usage_monthly`, and
       `lesson_processing_latency`.
 - [ ] Seed data loaded (if required).
