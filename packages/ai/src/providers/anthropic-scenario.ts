@@ -53,13 +53,14 @@ export async function inferScenarioWithAnthropic(
     seedOpening: input.seedOpening,
   });
 
-  const rawResponse = await anthropicChatCompletion({
+  const completion = await anthropicChatCompletion({
     model,
     system,
     messages,
     maxTokens: input.maxTokens ?? SCENARIO_MAX_TOKENS,
   });
 
+  const rawResponse = completion.text;
   const response = parseScenarioResponse(rawResponse);
   return {
     response,
